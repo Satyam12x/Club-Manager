@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>College Club Management Platform</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Custom animations */
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .fade-in {
+        animation: fadeIn 1s ease-out forwards;
+      }
+      .club-card {
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+      }
+      .club-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 20px rgba(0, 0, 0, 0.15);
+      }
+      .hero-bg {
+        background: linear-gradient(135deg, #3b82f6 0%, #1e3a8a 100%);
+      }
+      /* Smooth scrolling */
+      html {
+        scroll-behavior: smooth;
+      }
+    </style>
+  </head>
+  <body class="bg-gray-50 font-sans">
+    <!-- Header -->
+    <header class="bg-white shadow-md sticky top-0 z-50">
+      <div
+        class="container mx-auto px-4 py-4 flex justify-between items-center"
+      >
+        <h1 class="text-2xl font-bold text-blue-600">ClubHub</h1>
+        <nav class="space-x-6">
+          <a href="#home" class="text-gray-600 hover:text-blue-600 transition"
+            >Home</a
+          >
+          <a href="#clubs" class="text-gray-600 hover:text-blue-600 transition"
+            >Clubs</a
+          >
+          <a
+            href="#features"
+            class="text-gray-600 hover:text-blue-600 transition"
+            >Features</a
+          >
+          <a
+            href="#activities"
+            class="text-gray-600 hover:text-blue-600 transition"
+            >Activities</a
+          >
+          <button
+            class="bg-blue-600 text-white px-4 py-2 rounded-full hover:bg-blue-700 transition"
+          >
+            Login
+          </button>
+        </nav>
+      </div>
+    </header>
+
+    <!-- Hero Section -->
+    <section id="home" class="hero-bg text-white py-20">
+      <div class="container mx-auto px-4 text-center">
+        <h2 class="text-5xl font-extrabold mb-4 fade-in">
+          Join the Heart of Campus Life
+        </h2>
+        <p
+          class="text-lg mb-8 max-w-2xl mx-auto fade-in"
+          style="animation-delay: 0.2s"
+        >
+          Discover, join, and thrive in college clubs with ClubHub – your
+          one-stop platform for managing and engaging in vibrant student
+          activities.
+        </p>
+        <a
+          href="#clubs"
+          class="bg-white text-blue-600 px-6 py-3 rounded-full font-semibold hover:bg-gray-100 transition fade-in"
+          style="animation-delay: 0.4s"
+        >
+          Explore Clubs
+        </a>
+      </div>
+    </section>
+
+    <!-- Clubs Section -->
+    <section id="clubs" class="py-16 bg-white">
+      <div class="container mx-auto px-4">
+        <h2 class="text-3xl font-bold text-center mb-12 fade-in">Our Clubs</h2>
+        <div
+          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8"
+          id="clubs-list"
+        >
+          <!-- Clubs will be dynamically populated -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="py-16 bg-gray-100">
+      <div class="container mx-auto px-4">
+        <h2 class="text-3xl font-bold text-center mb-12 fade-in">
+          Why Choose ClubHub?
+        </h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+          <div
+            class="bg-white p-6 rounded-lg shadow-lg text-center fade-in"
+            style="animation-delay: 0.2s"
+          >
+            <div class="text-blue-600 text-4xl mb-4">🎉</div>
+            <h3 class="text-xl font-semibold mb-2">Vibrant Community</h3>
+            <p class="text-gray-600">
+              Connect with passionate students and engage in exciting club
+              activities.
+            </p>
+          </div>
+          <div
+            class="bg-white p-6 rounded-lg shadow-lg text-center fade-in"
+            style="animation-delay: 0.4s"
+          >
+            <div class="text-blue-600 text-4xl mb-4">🏆</div>
+            <h3 class="text-xl font-semibold mb-2">Achievements & Badges</h3>
+            <p class="text-gray-600">
+              Earn badges and climb the Hall of Fame with your contributions.
+            </p>
+          </div>
+          <div
+            class="bg-white p-6 rounded-lg shadow-lg text-center fade-in"
+            style="animation-delay: 0.6s"
+          >
+            <div class="text-blue-600 text-4xl mb-4">📅</div>
+            <h3 class="text-xl font-semibold mb-2">Event Management</h3>
+            <p class="text-gray-600">
+              Stay updated with events and communicate seamlessly via WhatsApp
+              and email.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Activities Section -->
+    <section id="activities" class="py-16 bg-white">
+      <div class="container mx-auto px-4">
+        <h2 class="text-3xl font-bold text-center mb-12 fade-in">
+          Recent Activities
+        </h2>
+        <div
+          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8"
+          id="activities-list"
+        >
+          <!-- Activities will be dynamically populated -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="bg-blue-600 text-white py-8">
+      <div class="container mx-auto px-4 text-center">
+        <p class="mb-4">© 2025 ClubHub. All rights reserved.</p>
+        <div class="space-x-4">
+          <a href="#" class="text-white hover:text-gray-200 transition"
+            >Contact Us</a
+          >
+          <a href="#" class="text-white hover:text-gray-200 transition"
+            >Privacy Policy</a
+          >
+          <a href="#" class="text-white hover:text-gray-200 transition"
+            >Terms of Service</a
+          >
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // Mock data
+      const mockData = {
+        clubs: [
+          {
+            id: 1,
+            name: "Coding Club",
+            description:
+              "Master programming with hands-on projects and coding challenges.",
+            image: "https://via.placeholder.com/300x200?text=Coding+Club",
+          },
+          {
+            id: 2,
+            name: "Music Club",
+            description:
+              "Explore music creation and performances with fellow enthusiasts.",
+            image: "https://via.placeholder.com/300x200?text=Music+Club",
+          },
+          {
+            id: 3,
+            name: "Art Club",
+            description:
+              "Unleash your creativity through painting, sketching, and more.",
+            image: "https://via.placeholder.com/300x200?text=Art+Club",
+          },
+        ],
+        activities: [
+          {
+            id: 1,
+            title: "Hackathon 2025",
+            club: "Coding Club",
+            image: "https://via.placeholder.com/300x200?text=Hackathon",
+          },
+          {
+            id: 2,
+            title: "Concert Night",
+            club: "Music Club",
+            image: "https://via.placeholder.com/300x200?text=Concert",
+          },
+          {
+            id: 3,
+            title: "Art Exhibition",
+            club: "Art Club",
+            image: "https://via.placeholder.com/300x200?text=Art+Exhibition",
+          },
+        ],
+      };
+
+      // Populate Clubs
+      const clubsList = document.getElementById("clubs-list");
+      mockData.clubs.forEach((club, index) => {
+        const clubCard = document.createElement("div");
+        clubCard.className =
+          "club-card bg-white rounded-lg shadow-lg overflow-hidden fade-in";
+        clubCard.style.animationDelay = `${index * 0.2}s`;
+        clubCard.innerHTML = `
+        <img src="${club.image}" alt="${club.name}" class="w-full h-48 object-cover">
+        <div class="p-6">
+          <h3 class="text-xl font-semibold mb-2">${club.name}</h3>
+          <p class="text-gray-600 mb-4">${club.description}</p>
+          <button class="bg-blue-600 text-white px-4 py-2 rounded-full hover:bg-blue-700 transition">
+            Learn More
+          </button>
+        </div>
+      `;
+        clubsList.appendChild(clubCard);
+      });
+
+      // Populate Activities
+      const activitiesList = document.getElementById("activities-list");
+      mockData.activities.forEach((activity, index) => {
+        const activityCard = document.createElement("div");
+        activityCard.className =
+          "club-card bg-white rounded-lg shadow-lg overflow-hidden fade-in";
+        activityCard.style.animationDelay = `${index * 0.2}s`;
+        activityCard.innerHTML = `
+        <img src="${activity.image}" alt="${activity.title}" class="w-full h-48 object-cover">
+        <div class="p-6">
+          <h3 class="text-xl font-semibold mb-2">${activity.title}</h3>
+          <p class="text-gray-600 mb-4">Organized by ${activity.club}</p>
+          <button class="bg-blue-600 text-white px-4 py-2 rounded-full hover:bg-blue-700 transition">
+            View Details
+          </button>
+        </div>
+      `;
+        activitiesList.appendChild(activityCard);
+      });
+
+      // Smooth scroll for nav links
+      document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+        anchor.addEventListener("click", function (e) {
+          e.preventDefault();
+          const targetId = this.getAttribute("href").substring(1);
+          const targetElement = document.getElementById(targetId);
+          if (targetElement) {
+            targetElement.scrollIntoView({ behavior: "smooth" });
+          }
+        });
+      });
+    </script>
+  </body>
+</html>
