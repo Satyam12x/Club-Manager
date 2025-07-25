@@ -41,7 +41,9 @@ const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const filetypes = /jpeg|jpg|png/;
-    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const extname = filetypes.test(
+      path.extname(file.originalname).toLowerCase()
+    );
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) {
       return cb(null, true);
@@ -68,6 +70,7 @@ const userSchema = new mongoose.Schema({
   specialization: { type: String, default: null },
   isClubMember: { type: Boolean, default: false },
   clubName: { type: [String], default: [] },
+  pendingClubs: { type: [String], default: [] }, // New field for pending club requests
   isAdmin: { type: Boolean, default: false },
   isHeadCoordinator: { type: Boolean, default: false },
   headCoordinatorClubs: { type: [String], default: [] },
@@ -116,6 +119,22 @@ const activitySchema = new mongoose.Schema({
 });
 
 const Activity = mongoose.model("Activity", activitySchema);
+
+const membershipRequestSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  clubName: { type: String, required: true },
+  status: {
+    type: String,
+    enum: ["pending", "approved", "rejected"],
+    default: "pending",
+  },
+  requestedAt: { type: Date, default: Date.now },
+});
+
+const MembershipRequest = mongoose.model(
+  "MembershipRequest",
+  membershipRequestSchema
+);
 
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
@@ -272,6 +291,23 @@ app.post("/api/auth/login-password", async (req, res) => {
   res.json({ token });
 });
 
+// Middleware to check super admin
+const isSuperAdmin = async (req, res, next) => {
+  try {
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (!superAdminEmails.includes(req.user.email)) {
+      return res.status(403).json({ error: "Super admin access required" });
+    }
+    next();
+  } catch (err) {
+    console.error("Super admin check error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// Update /api/auth/signup to set isAdmin based on SUPER_ADMIN_EMAILS
 app.post("/api/auth/signup", async (req, res) => {
   const { name, email, password, mobile } = req.body;
   if (!name || !email || !password) {
@@ -291,11 +327,12 @@ app.post("/api/auth/signup", async (req, res) => {
       return res.status(400).json({ error: "User already exists" });
     }
 
-    const adminIds = process.env.ADMIN_IDS
-      ? process.env.ADMIN_IDS.split(",").map((id) => id.trim())
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
-    const isAdmin = adminIds.includes(email);
+    const isAdmin = superAdminEmails.includes(email);
 
+    // Check if email is a head coordinator for any club
     const clubs = await Club.find({ headCoordinators: email });
     const headCoordinatorClubs = clubs.map((club) => club.name);
     const isHeadCoordinator = headCoordinatorClubs.length > 0;
@@ -405,7 +442,9 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
       "name"
     );
     if (clubName.some((name) => !validClubs.includes(name))) {
-      return res.status(400).json({ error: "One or more club names are invalid" });
+      return res
+        .status(400)
+        .json({ error: "One or more club names are invalid" });
     }
 
     user.clubName = [...new Set([...user.clubName, ...clubName])];
@@ -468,7 +507,9 @@ app.post(
     }
     if (
       category &&
-      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)
+      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
+        category
+      )
     ) {
       return res.status(400).json({ error: "Invalid category" });
     }
@@ -481,7 +522,9 @@ app.post(
           .map((email) => email.trim())
           .filter((email) => email);
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        validHeadCoordinators = emails.filter((email) => emailRegex.test(email));
+        validHeadCoordinators = emails.filter((email) =>
+          emailRegex.test(email)
+        );
         await User.updateMany(
           { email: { $in: validHeadCoordinators } },
           {
@@ -511,6 +554,189 @@ app.post(
     }
   }
 );
+
+app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const club = await Club.findById(id);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (user.clubName.includes(club.name)) {
+      return res
+        .status(400)
+        .json({ error: "You are already a member of this club" });
+    }
+
+    if (user.pendingClubs.includes(club.name)) {
+      return res
+        .status(400)
+        .json({ error: "Membership request already pending" });
+    }
+
+    // Create membership request
+    const membershipRequest = new MembershipRequest({
+      userId: user._id,
+      clubName: club.name,
+    });
+    await membershipRequest.save();
+
+    // Add to pendingClubs
+    user.pendingClubs.push(club.name);
+    await user.save();
+
+    // Notify admins and head coordinators
+    const recipients = [
+      ...club.headCoordinators,
+      ...(process.env.SUPER_ADMIN_EMAILS
+        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+        : []),
+    ];
+    if (recipients.length > 0) {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: recipients,
+        subject: `New Membership Request for ${club.name}`,
+        text: `User ${user.name} (${user.email}) has requested to join ${club.name}. Please review the request in the admin dashboard.`,
+      });
+    }
+
+    res.json({ message: "Membership request sent successfully" });
+  } catch (err) {
+    console.error("Error requesting club membership:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Get membership requests (Super Admin or Head Coordinator)
+app.get("/api/membership-requests", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    let query = {};
+    if (!superAdminEmails.includes(user.email)) {
+      // Restrict to head coordinator's clubs
+      if (!user.isHeadCoordinator || !user.headCoordinatorClubs.length) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      query.clubName = { $in: user.headCoordinatorClubs };
+    }
+
+    const requests = await MembershipRequest.find(query).populate(
+      "userId",
+      "name email mobile"
+    );
+    res.json(requests);
+  } catch (err) {
+    console.error("Error fetching membership requests:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Approve/Reject membership request (Super Admin or Head Coordinator)
+app.patch(
+  "/api/membership-requests/:id",
+  authenticateToken,
+  async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body; // 'approved' or 'rejected'
+    if (!["approved", "rejected"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    try {
+      const request = await MembershipRequest.findById(id);
+      if (!request) {
+        return res.status(404).json({ error: "Membership request not found" });
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+        : [];
+      if (
+        !superAdminEmails.includes(user.email) &&
+        (!user.isHeadCoordinator ||
+          !user.headCoordinatorClubs.includes(request.clubName))
+      ) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      request.status = status;
+      await request.save();
+
+      const targetUser = await User.findById(request.userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "Target user not found" });
+      }
+
+      if (status === "approved") {
+        targetUser.clubName.push(request.clubName);
+        targetUser.isClubMember = true;
+        targetUser.pendingClubs = targetUser.pendingClubs.filter(
+          (club) => club !== request.clubName
+        );
+        await targetUser.save();
+
+        // Notify user
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: targetUser.email,
+          subject: `Membership Request Approved for ${request.clubName}`,
+          text: `Congratulations! Your request to join ${request.clubName} has been approved.`,
+        });
+      } else {
+        targetUser.pendingClubs = targetUser.pendingClubs.filter(
+          (club) => club !== request.clubName
+        );
+        await targetUser.save();
+
+        // Notify user
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: targetUser.email,
+          subject: `Membership Request Rejected for ${request.clubName}`,
+          text: `We regret to inform you that your request to join ${request.clubName} has been rejected.`,
+        });
+      }
+
+      res.json({ message: `Membership request ${status} successfully` });
+    } catch (err) {
+      console.error("Error updating membership request:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
+// Get single club by ID
+app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
+  try {
+    const club = await Club.findById(req.params.id);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+    res.json(club);
+  } catch (err) {
+    console.error("Error fetching club:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // Update Club (Admin or Head Coordinator)
 app.patch(
@@ -544,7 +770,9 @@ app.patch(
               .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        validHeadCoordinators = emails.filter((email) => emailRegex.test(email));
+        validHeadCoordinators = emails.filter((email) =>
+          emailRegex.test(email)
+        );
         await User.updateMany(
           { email: { $in: validHeadCoordinators } },
           {
@@ -634,7 +862,9 @@ app.delete(
       }
 
       if (!user.clubName.includes(club.name)) {
-        return res.status(400).json({ error: "User is not a member of this club" });
+        return res
+          .status(400)
+          .json({ error: "User is not a member of this club" });
       }
 
       user.clubName = user.clubName.filter((name) => name !== club.name);
