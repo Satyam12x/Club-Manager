@@ -1,10 +1,10 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const dotenv = require('dotenv');
-const nodemailer = require('nodemailer');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const dotenv = require("dotenv");
+const nodemailer = require("nodemailer");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 
 dotenv.config();
 
@@ -15,21 +15,23 @@ app.use(cors());
 app.use(express.json());
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connected"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 
 // User Schema
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
+  mobile: { type: String, unique: true, sparse: true }, // Allow null values with sparse index
   createdAt: { type: Date, default: Date.now },
 });
 
 // Hash password before saving
-userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+userSchema.pre("save", async function (next) {
+  if (!this.isModified("password")) return next();
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
   next();
@@ -40,7 +42,7 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-const User = mongoose.model('User', userSchema);
+const User = mongoose.model("User", userSchema);
 
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
@@ -56,27 +58,28 @@ const transporter = nodemailer.createTransport({
 // Verify transporter configuration
 transporter.verify((error, success) => {
   if (error) {
-    console.error('Nodemailer configuration error:', {
+    console.error("Nodemailer configuration error:", {
       message: error.message,
       code: error.code,
       response: error.response,
     });
   } else {
-    console.log('Nodemailer transporter is ready to send emails');
+    console.log("Nodemailer transporter is ready to send emails");
   }
 });
 
 // Generate OTP
-const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+const generateOtp = () =>
+  Math.floor(100000 + Math.random() * 900000).toString();
 
 // Store OTPs temporarily (in-memory, replace with Redis in production)
 const otpStore = {};
 
 // Authentication Routes
-app.post('/api/auth/send-otp', async (req, res) => {
+app.post("/api/auth/send-otp", async (req, res) => {
   const { email } = req.body;
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Invalid email address' });
+    return res.status(400).json({ error: "Invalid email address" });
   }
 
   const otp = generateOtp();
@@ -86,13 +89,13 @@ app.post('/api/auth/send-otp', async (req, res) => {
     await transporter.sendMail({
       from: `"ACEM" <${process.env.EMAIL_USER}>`,
       to: email,
-      subject: 'Your ACEM OTP',
+      subject: "Your ACEM OTP",
       text: `Your OTP for ACEM is ${otp}. It is valid for 10 minutes.`,
     });
     console.log(`OTP ${otp} sent to ${email}`);
-    res.json({ message: 'OTP sent successfully' });
+    res.json({ message: "OTP sent successfully" });
   } catch (err) {
-    console.error('Nodemailer sendMail error:', {
+    console.error("Nodemailer sendMail error:", {
       message: err.message,
       code: err.code,
       response: err.response,
@@ -102,91 +105,121 @@ app.post('/api/auth/send-otp', async (req, res) => {
   }
 });
 
-app.post('/api/auth/verify-otp', async (req, res) => {
+app.post("/api/auth/verify-otp", async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp || otpStore[email] !== otp) {
-    return res.status(400).json({ error: 'Invalid OTP' });
+    return res.status(400).json({ error: "Invalid OTP" });
   }
 
   delete otpStore[email];
 
   let user = await User.findOne({ email });
   if (!user) {
-    return res.json({ message: 'OTP verified, proceed to set password' });
+    return res.json({ message: "OTP verified, proceed to set password" });
   }
 
-  const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
-    expiresIn: '1d',
-  });
+  const token = jwt.sign(
+    { id: user._id, email: user.email },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "1d",
+    }
+  );
   res.json({ token });
 });
 
-app.post('/api/auth/login-password', async (req, res) => {
+app.post("/api/auth/login-password", async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required' });
+    return res.status(400).json({ error: "Email and password are required" });
   }
 
   const user = await User.findOne({ email });
   if (!user) {
-    return res.status(400).json({ error: 'User not found' });
+    return res.status(400).json({ error: "User not found" });
   }
 
   const isMatch = await user.comparePassword(password);
   if (!isMatch) {
-    return res.status(400).json({ error: 'Invalid password' });
+    return res.status(400).json({ error: "Invalid password" });
   }
 
-  const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
-    expiresIn: '1d',
-  });
+  const token = jwt.sign(
+    { id: user._id, email: user.email },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "1d",
+    }
+  );
   res.json({ token });
 });
 
-app.post('/api/auth/signup', async (req, res) => {
-  const { name, email, password } = req.body;
+app.post("/api/auth/signup", async (req, res) => {
+  const { name, email, password, mobile } = req.body;
   if (!name || !email || !password) {
-    return res.status(400).json({ error: 'Name, email, and password are required' });
+    return res
+      .status(400)
+      .json({ error: "Name, email, and password are required" });
   }
   if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    return res
+      .status(400)
+      .json({ error: "Password must be at least 6 characters" });
   }
 
   try {
     let user = await User.findOne({ email });
     if (user) {
-      return res.status(400).json({ error: 'User already exists' });
+      return res.status(400).json({ error: "User already exists" });
     }
 
-    user = new User({ name, email, password });
+    user = new User({ name, email, password, mobile });
     await user.save();
 
-    const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
-    expiresIn: '1d',
-    });
+    const token = jwt.sign(
+      { id: user._id, email: user.email },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "1d",
+      }
+    );
     res.json({ token });
   } catch (err) {
-    console.error('Signup error:', err);
-    res.status(500).json({ error: 'Signup failed' });
+    console.error("Signup error:", err);
+    if (err.name === "ValidationError") {
+      return res
+        .status(400)
+        .json({ error: `Validation failed: ${err.message}` });
+    }
+    if (err.code === 11000) {
+      return res
+        .status(400)
+        .json({ error: "Duplicate key error: email or mobile already exists" });
+    }
+    res.status(500).json({ error: "Signup failed: Internal server error" });
   }
 });
 
-app.post('/api/auth/verify-otp-login', async (req, res) => {
+app.post("/api/auth/verify-otp-login", async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp || otpStore[email] !== otp) {
-    return res.status(400).json({ error: 'Invalid OTP' });
+    return res.status(400).json({ error: "Invalid OTP" });
   }
 
   delete otpStore[email];
 
   const user = await User.findOne({ email });
   if (!user) {
-    return res.status(400).json({ error: 'User not found' });
+    return res.status(400).json({ error: "User not found" });
   }
 
-  const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
-    expiresIn: '1d',
-  });
+  const token = jwt.sign(
+    { id: user._id, email: user.email },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: "1d",
+    }
+  );
   res.json({ token });
 });
 
@@ -197,7 +230,7 @@ const clubSchema = new mongoose.Schema({
   description: { type: String, required: true },
 });
 
-const Club = mongoose.model('Club', clubSchema);
+const Club = mongoose.model("Club", clubSchema);
 
 // Activity Schema
 const activitySchema = new mongoose.Schema({
@@ -207,52 +240,52 @@ const activitySchema = new mongoose.Schema({
   club: { type: String, required: true },
 });
 
-const Activity = mongoose.model('Activity', activitySchema);
+const Activity = mongoose.model("Activity", activitySchema);
 
 // Middleware to verify JWT
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
+    if (err) return res.status(403).json({ error: "Invalid or expired token" });
     req.user = user;
     next();
   });
 };
 
 // Get User Data
-app.get('/api/auth/user', authenticateToken, async (req, res) => {
+app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('name email');
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const user = await User.findById(req.user.id).select("name email");
+    if (!user) return res.status(404).json({ error: "User not found" });
     res.json(user);
   } catch (err) {
-    console.error('Error fetching user:', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error("Error fetching user:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 // Get Clubs
-app.get('/api/clubs', authenticateToken, async (req, res) => {
+app.get("/api/clubs", authenticateToken, async (req, res) => {
   try {
     const clubs = await Club.find();
     res.json(clubs);
   } catch (err) {
-    console.error('Error fetching clubs:', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error("Error fetching clubs:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 // Get Activities
-app.get('/api/activities', authenticateToken, async (req, res) => {
+app.get("/api/activities", authenticateToken, async (req, res) => {
   try {
     const activities = await Activity.find();
     res.json(activities);
   } catch (err) {
-    console.error('Error fetching activities:', err);
-    res.status(500).json({ error: 'Server error' });
+    console.error("Error fetching activities:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
