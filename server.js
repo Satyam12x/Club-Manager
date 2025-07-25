@@ -48,12 +48,25 @@ const User = mongoose.model('User', userSchema);
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
-  port: process.env.EMAIL_PORT,
+  port: parseInt(process.env.EMAIL_PORT, 10), // Ensure port is a number
   secure: process.env.EMAIL_PORT == 465, // true for 465 (SSL), false for other ports
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+});
+
+// Verify transporter configuration
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('Nodemailer configuration error:', {
+      message: error.message,
+      code: error.code,
+      response: error.response,
+    });
+  } else {
+    console.log('Nodemailer transporter is ready to send emails');
+  }
 });
 
 // Generate OTP
@@ -79,10 +92,16 @@ app.post('/api/auth/send-otp', async (req, res) => {
       subject: 'Your ACEM OTP',
       text: `Your OTP for ACEM is ${otp}. It is valid for 10 minutes.`,
     });
+    console.log(`OTP ${otp} sent to ${email}`);
     res.json({ message: 'OTP sent successfully' });
   } catch (err) {
-    console.error('Nodemailer error:', err);
-    res.status(500).json({ error: 'Failed to send OTP' });
+    console.error('Nodemailer sendMail error:', {
+      message: err.message,
+      code: err.code,
+      response: err.response,
+      responseCode: err.responseCode,
+    });
+    res.status(500).json({ error: `Failed to send OTP: ${err.message}` });
   }
 });
 
@@ -146,7 +165,7 @@ app.post('/api/auth/signup', async (req, res) => {
     await user.save();
 
     const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
-      expiresIn: '1d',
+    expiresIn: '1d',
     });
     res.json({ token });
   } catch (err) {
@@ -172,6 +191,72 @@ app.post('/api/auth/verify-otp-login', async (req, res) => {
     expiresIn: '1d',
   });
   res.json({ token });
+});
+
+// Club Schema
+const clubSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  icon: { type: String, required: true },
+  description: { type: String, required: true },
+});
+
+const Club = mongoose.model('Club', clubSchema);
+
+// Activity Schema
+const activitySchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  date: { type: String, required: true },
+  description: { type: String, required: true },
+  club: { type: String, required: true },
+});
+
+const Activity = mongoose.model('Activity', activitySchema);
+
+// Middleware to verify JWT
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
+    req.user = user;
+    next();
+  });
+};
+
+// Get User Data
+app.get('/api/auth/user', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('name email');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user);
+  } catch (err) {
+    console.error('Error fetching user:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get Clubs
+app.get('/api/clubs', authenticateToken, async (req, res) => {
+  try {
+    const clubs = await Club.find();
+    res.json(clubs);
+  } catch (err) {
+    console.error('Error fetching clubs:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get Activities
+app.get('/api/activities', authenticateToken, async (req, res) => {
+  try {
+    const activities = await Activity.find();
+    res.json(activities);
+  } catch (err) {
+    console.error('Error fetching activities:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
