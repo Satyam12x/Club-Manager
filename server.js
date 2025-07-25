@@ -5,6 +5,9 @@ const dotenv = require("dotenv");
 const nodemailer = require("nodemailer");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 dotenv.config();
 
@@ -13,6 +16,40 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Serve uploaded files statically
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir);
+}
+
+// Multer configuration for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, `${uniqueSuffix}-${file.originalname}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    const filetypes = /jpeg|jpg|png/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mimetype);
+    if (extname && mimetype) {
+      return cb(null, true);
+    }
+    cb(new Error("Only JPEG and PNG images are allowed"));
+  },
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+});
 
 // MongoDB Connection
 mongoose
@@ -56,6 +93,7 @@ const User = mongoose.model("User", userSchema);
 const clubSchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true },
   icon: { type: String, required: true },
+  banner: { type: String }, // New field for banner
   description: { type: String, required: true },
   category: {
     type: String,
@@ -63,7 +101,7 @@ const clubSchema = new mongoose.Schema({
     required: true,
   },
   contactEmail: { type: String },
-  headCoordinators: { type: [String], default: [] }, // Emails of head coordinators
+  headCoordinators: { type: [String], default: [] },
 });
 
 const Club = mongoose.model("Club", clubSchema);
@@ -90,7 +128,6 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Verify transporter configuration
 transporter.verify((error, success) => {
   if (error) {
     console.error("Nodemailer configuration error:", {
@@ -107,7 +144,7 @@ transporter.verify((error, success) => {
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
-// Store OTPs temporarily (in-memory, replace with Redis in production)
+// Store OTPs temporarily
 const otpStore = {};
 
 // Middleware to verify JWT
@@ -137,7 +174,7 @@ const isAdmin = async (req, res, next) => {
   }
 };
 
-// Middleware to check head coordinator or admin for a specific club
+// Middleware to check head coordinator or admin
 const isHeadCoordinatorOrAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
@@ -259,7 +296,6 @@ app.post("/api/auth/signup", async (req, res) => {
       : [];
     const isAdmin = adminIds.includes(email);
 
-    // Check if email is a head coordinator for any club
     const clubs = await Club.find({ headCoordinators: email });
     const headCoordinatorClubs = clubs.map((club) => club.name);
     const isHeadCoordinator = headCoordinatorClubs.length > 0;
@@ -365,7 +401,6 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Validate club names
     const validClubs = await Club.find({ name: { $in: clubName } }).distinct(
       "name"
     );
@@ -373,7 +408,6 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "One or more club names are invalid" });
     }
 
-    // Add new clubs to user's clubName array, avoiding duplicates
     user.clubName = [...new Set([...user.clubName, ...clubName])];
     user.isClubMember =
       isClubMember !== undefined ? isClubMember : user.clubName.length > 0;
@@ -416,71 +450,81 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
 });
 
 // Create Club (Admin only)
-app.post("/api/clubs", authenticateToken, isAdmin, async (req, res) => {
-  const { name, icon, description, category, contactEmail, headCoordinators } =
-    req.body;
-  if (!name || !icon || !description || !category) {
-    return res
-      .status(400)
-      .json({ error: "Name, icon, description, and category are required" });
-  }
-  if (
-    category &&
-    !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)
-  ) {
-    return res.status(400).json({ error: "Invalid category" });
-  }
-
-  try {
-    // Validate head coordinator emails
-    let validHeadCoordinators = [];
-    if (headCoordinators) {
-      const emails = headCoordinators
-        .split(",")
-        .map((email) => email.trim())
-        .filter((email) => email);
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      validHeadCoordinators = emails.filter((email) => emailRegex.test(email));
-      // Update existing users who are head coordinators
-      await User.updateMany(
-        { email: { $in: validHeadCoordinators } },
-        {
-          $set: { isHeadCoordinator: true },
-          $addToSet: { headCoordinatorClubs: name },
-        }
-      );
+app.post(
+  "/api/clubs",
+  authenticateToken,
+  isAdmin,
+  upload.fields([
+    { name: "icon", maxCount: 1 },
+    { name: "banner", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    const { name, description, category, contactEmail, headCoordinators } =
+      req.body;
+    if (!name || !description || !category || !req.files.icon) {
+      return res
+        .status(400)
+        .json({ error: "Name, description, category, and icon are required" });
+    }
+    if (
+      category &&
+      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)
+    ) {
+      return res.status(400).json({ error: "Invalid category" });
     }
 
-    const club = new Club({
-      name,
-      icon,
-      description,
-      category,
-      contactEmail,
-      headCoordinators: validHeadCoordinators,
-    });
-    await club.save();
-    res.status(201).json({ message: "Club created successfully", club });
-  } catch (err) {
-    console.error("Club creation error:", err);
-    if (err.code === 11000) {
-      return res.status(400).json({ error: "Club name already exists" });
+    try {
+      let validHeadCoordinators = [];
+      if (headCoordinators) {
+        const emails = headCoordinators
+          .split(",")
+          .map((email) => email.trim())
+          .filter((email) => email);
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        validHeadCoordinators = emails.filter((email) => emailRegex.test(email));
+        await User.updateMany(
+          { email: { $in: validHeadCoordinators } },
+          {
+            $set: { isHeadCoordinator: true },
+            $addToSet: { headCoordinatorClubs: name },
+          }
+        );
+      }
+
+      const club = new Club({
+        name,
+        icon: req.files.icon[0].path,
+        banner: req.files.banner ? req.files.banner[0].path : null,
+        description,
+        category,
+        contactEmail,
+        headCoordinators: validHeadCoordinators,
+      });
+      await club.save();
+      res.status(201).json({ message: "Club created successfully", club });
+    } catch (err) {
+      console.error("Club creation error:", err);
+      if (err.code === 11000) {
+        return res.status(400).json({ error: "Club name already exists" });
+      }
+      res.status(500).json({ error: "Server error" });
     }
-    res.status(500).json({ error: "Server error" });
   }
-});
+);
 
 // Update Club (Admin or Head Coordinator)
 app.patch(
   "/api/clubs/:id",
   authenticateToken,
   isHeadCoordinatorOrAdmin,
+  upload.fields([
+    { name: "icon", maxCount: 1 },
+    { name: "banner", maxCount: 1 },
+  ]),
   async (req, res) => {
     const { id } = req.params;
-    const { icon, description, category, contactEmail, headCoordinators } =
-      req.body;
+    const { description, category, contactEmail, headCoordinators } = req.body;
 
-    // Prevent updating club name
     if (req.body.name) {
       return res.status(400).json({ error: "Club name cannot be updated" });
     }
@@ -491,7 +535,6 @@ app.patch(
         return res.status(404).json({ error: "Club not found" });
       }
 
-      // Validate and update head coordinator emails
       let validHeadCoordinators = club.headCoordinators;
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
@@ -502,7 +545,6 @@ app.patch(
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) => emailRegex.test(email));
-        // Update users who are new head coordinators
         await User.updateMany(
           { email: { $in: validHeadCoordinators } },
           {
@@ -510,7 +552,6 @@ app.patch(
             $addToSet: { headCoordinatorClubs: club.name },
           }
         );
-        // Remove head coordinator status from users no longer in the list
         await User.updateMany(
           {
             email: { $nin: validHeadCoordinators, $in: club.headCoordinators },
@@ -519,17 +560,23 @@ app.patch(
           {
             $pull: { headCoordinatorClubs: club.name },
             $set: {
-              isHeadCoordinator: { $cond: [{ $eq: ["$headCoordinatorClubs", []] }, false, true] },
+              isHeadCoordinator: {
+                $cond: [{ $eq: ["$headCoordinatorClubs", []] }, false, true],
+              },
             },
           }
         );
       }
 
-      // Update club fields
-      if (icon) club.icon = icon;
+      if (req.files.icon) club.icon = req.files.icon[0].path;
+      if (req.files.banner) club.banner = req.files.banner[0].path;
       if (description) club.description = description;
       if (category) {
-        if (!["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)) {
+        if (
+          !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
+            category
+          )
+        ) {
           return res.status(400).json({ error: "Invalid category" });
         }
         club.category = category;
@@ -541,6 +588,62 @@ app.patch(
       res.status(200).json({ message: "Club updated successfully", club });
     } catch (err) {
       console.error("Club update error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
+// Get Club Members
+app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
+  try {
+    const club = await Club.findById(req.params.id);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+    const members = await User.find(
+      { clubName: club.name },
+      "name email"
+    ).lean();
+    res.json(members);
+  } catch (err) {
+    console.error("Error fetching club members:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Remove Club Member (Admin or Head Coordinator)
+app.delete(
+  "/api/clubs/:id/members",
+  authenticateToken,
+  isHeadCoordinatorOrAdmin,
+  async (req, res) => {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "Member email is required" });
+    }
+
+    try {
+      const club = await Club.findById(req.params.id);
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      const user = await User.findOne({ email });
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (!user.clubName.includes(club.name)) {
+        return res.status(400).json({ error: "User is not a member of this club" });
+      }
+
+      user.clubName = user.clubName.filter((name) => name !== club.name);
+      user.isClubMember = user.clubName.length > 0;
+      await user.save();
+
+      res.json({ message: "Member removed successfully" });
+    } catch (err) {
+      console.error("Error removing club member:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
