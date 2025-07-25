@@ -765,9 +765,9 @@ app.patch(
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-              .split(",")
-              .map((email) => email.trim())
-              .filter((email) => email)
+            .split(",")
+            .map((email) => email.trim())
+            .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
