@@ -26,6 +26,11 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   mobile: { type: String, unique: true, sparse: true }, // Allow null values with sparse index
+  semester: { type: Number, default: null },
+  course: { type: String, default: null },
+  specialization: { type: String, default: null },
+  isClubMember: { type: Boolean, default: false },
+  clubName: { type: [String], default: [] }, // Store clubs as an array of strings
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -74,6 +79,19 @@ const generateOtp = () =>
 
 // Store OTPs temporarily (in-memory, replace with Redis in production)
 const otpStore = {};
+
+// Middleware to verify JWT (moved before routes)
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: "Invalid or expired token" });
+    req.user = user;
+    next();
+  });
+};
 
 // Authentication Routes
 app.post("/api/auth/send-otp", async (req, res) => {
@@ -185,7 +203,7 @@ app.post("/api/auth/signup", async (req, res) => {
     );
     res.json({ token });
   } catch (err) {
-    console.error("Signup error:", err);
+    console.error("signup error:", err);
     if (err.name === "ValidationError") {
       return res
         .status(400)
@@ -202,7 +220,7 @@ app.post("/api/auth/signup", async (req, res) => {
 
 app.post("/api/auth/verify-otp-login", async (req, res) => {
   const { email, otp } = req.body;
-  if (!email || !otp || otpStore[email] !== otp) {
+  if (!email, !otp || !otpStore[email] !== otp) {
     return res.status(400).json({ error: "Invalid OTP" });
   }
 
@@ -211,16 +229,45 @@ app.post("/api/auth/verify-otp-login", async (req, res) => {
   const user = await User.findOne({ email });
   if (!user) {
     return res.status(400).json({ error: "User not found" });
+    const token = jwt.sign(
+      { id: user._id, email: user.email },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "1d",
+      }
+    );
+    res.json({ token });
+  }
+});
+
+// User Details Endpoint
+app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
+  const { semester, course, specialization, isClubMember, clubName } = req.body;
+  if (!semester || !course || !specialization) {
+    return res.status(400).json({ error: "Semester, course, and specialization are required" });
+  }
+  if (isClubMember && (!clubName || clubName.length === 0)) {
+    return res.status(400).json({ error: "Club names are required if you are a club member" });
   }
 
-  const token = jwt.sign(
-    { id: user._id, email: user.email },
-    process.env.JWT_SECRET,
-    {
-      expiresIn: "1d",
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
     }
-  );
-  res.json({ token });
+
+    user.semester = semester;
+    user.course = course;
+    user.specialization = specialization;
+    user.isClubMember = isClubMember;
+    user.clubName = isClubMember ? clubName : [];
+    await user.save();
+
+    res.status(200).json({ message: "User details saved successfully" });
+  } catch (err) {
+    console.error("User details error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 // Club Schema
@@ -242,23 +289,10 @@ const activitySchema = new mongoose.Schema({
 
 const Activity = mongoose.model("Activity", activitySchema);
 
-// Middleware to verify JWT
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Invalid or expired token" });
-    req.user = user;
-    next();
-  });
-};
-
 // Get User Data
 app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("name email");
+    const user = await User.findById(req.user.id).select("name email semester course specialization isClubMember clubName");
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json(user);
   } catch (err) {
