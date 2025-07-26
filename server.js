@@ -21,7 +21,7 @@ app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, "Uploads");
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
+  fs.mkdirSync(UploadsDir);
 }
 
 // Multer configuration
@@ -63,6 +63,7 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   mobile: { type: String, unique: true, sparse: true },
+  rollNo: { type: String, unique: true, sparse: true },
   semester: { type: Number, default: null },
   course: { type: String, default: null },
   specialization: { type: String, default: null },
@@ -160,7 +161,7 @@ const notificationSchema = new mongoose.Schema({
   message: { type: String, required: true },
   type: {
     type: String,
-    enum: ["membership", "event", "activity", "general"],
+    enum: ["membership", "event", "activity", "general", "attendance"],
     default: "general",
   },
   read: { type: Boolean, default: false },
@@ -185,6 +186,31 @@ const MembershipRequest = mongoose.model(
   "MembershipRequest",
   membershipRequestSchema
 );
+
+// Attendance Schema
+const attendanceSchema = new mongoose.Schema({
+  club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
+  date: { type: String, required: true },
+  lectureNumber: { type: Number, required: true },
+  attendance: [{
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    status: { type: String, enum: ["present", "absent"], required: true },
+  }],
+  stats: {
+    presentCount: { type: Number, default: 0 },
+    absentCount: { type: Number, default: 0 },
+    totalMarked: { type: Number, default: 0 },
+    attendanceRate: { type: Number, default: 0 },
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Attendance = mongoose.model("Attendance", attendanceSchema);
 
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
@@ -239,6 +265,39 @@ const isAdmin = async (req, res, next) => {
     next();
   } catch (err) {
     console.error("Admin check error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// Middleware to check super admin or admin
+const isSuperAdminOrAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (user.isAdmin || superAdminEmails.includes(user.email)) {
+      return next();
+    }
+    if (req.body.club) {
+      const club = await Club.findById(req.body.club);
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+      if (
+        club.superAdmins
+          .map((id) => id.toString())
+          .includes(user._id.toString())
+      ) {
+        return next();
+      }
+    }
+    res.status(403).json({ error: "Super admin or admin access required" });
+  } catch (err) {
+    console.error("Super admin or admin check error:", err);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -382,7 +441,7 @@ app.post("/api/auth/login-password", async (req, res) => {
 });
 
 app.post("/api/auth/signup", async (req, res) => {
-  const { name, email, password, mobile } = req.body;
+  const { name, email, password, mobile, rollNo } = req.body;
   if (!name || !email || !password) {
     return res
       .status(400)
@@ -413,6 +472,7 @@ app.post("/api/auth/signup", async (req, res) => {
       email,
       password,
       mobile,
+      rollNo,
       isAdmin,
       isHeadCoordinator,
       headCoordinatorClubs,
@@ -437,7 +497,7 @@ app.post("/api/auth/signup", async (req, res) => {
     if (err.code === 11000) {
       return res
         .status(400)
-        .json({ error: "Duplicate key error: email or mobile already exists" });
+        .json({ error: "Duplicate key error: email, mobile, or roll number already exists" });
     }
     res.status(500).json({ error: "Signup failed: Internal server error" });
   }
@@ -520,7 +580,7 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
 
 // User Details Endpoint (POST)
 app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
-  const { semester, course, specialization, isClubMember, clubName } = req.body;
+  const { semester, course, specialization, isClubMember, clubName, rollNo } = req.body;
   if (!semester || !course || !specialization) {
     return res
       .status(400)
@@ -541,6 +601,7 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
     user.semester = semester;
     user.course = course;
     user.specialization = specialization;
+    user.rollNo = rollNo || user.rollNo;
     user.isClubMember = isClubMember;
     user.clubName = isClubMember ? clubName : [];
     await user.save();
@@ -593,7 +654,7 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
 
     res.status(200).json({ message: "Club joined successfully" });
   } catch (err) {
-    console.error("Error updating user VNDdetails:", err);
+    console.error("Error updating user details:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -602,7 +663,7 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
 app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs"
+      "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo"
     );
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json(user);
@@ -616,7 +677,7 @@ app.get("/api/auth/user", authenticateToken, async (req, res) => {
 app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
   try {
     const users = await User.find().select(
-      "name email mobile semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs createdAt"
+      "name email mobile semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs createdAt rollNo"
     );
     res.json(users);
   } catch (err) {
@@ -970,6 +1031,7 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
 
     await MembershipRequest.deleteMany({ clubName: club.name });
     await Event.deleteMany({ club: club._id });
+    await Attendance.deleteMany({ club: club._id });
 
     if (club.icon && fs.existsSync(club.icon)) fs.unlinkSync(club.icon);
     if (club.banner && fs.existsSync(club.banner)) fs.unlinkSync(club.banner);
@@ -1223,7 +1285,7 @@ app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
     }
     const members = await User.find(
       { clubName: club.name },
-      "name email mobile phone"
+      "name email mobile phone rollNo"
     ).lean();
     res.json(members);
   } catch (err) {
@@ -1560,7 +1622,7 @@ app.get("/api/activities", authenticateToken, async (req, res) => {
 });
 
 // Get Single Activity
-app.get("/api/activities/:id", authenticateToken, async (req, rVNDes) => {
+app.get("/api/activities/:id", authenticateToken, async (req, res) => {
   try {
     const activity = await Activity.findById(req.params.id).populate(
       "createdBy",
@@ -1778,7 +1840,7 @@ app.post("/api/contact", authenticateToken, async (req, res) => {
   try {
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-      : [];
+      : ["satyam.pandey@acem.edu.in"];
     if (superAdminEmails.length === 0) {
       return res
         .status(500)
@@ -1802,6 +1864,113 @@ app.post("/api/contact", authenticateToken, async (req, res) => {
   } catch (err) {
     console.error("Error sending contact email:", err);
     res.status(500).json({ error: "Failed to send message" });
+  }
+});
+
+// Get Club Contact Details
+app.get("/api/clubs/:clubId/contacts", authenticateToken, async (req, res) => {
+  try {
+    const club = await Club.findById(req.params.clubId);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    const defaultContact = {
+      email: "satyam.pandey@acem.edu.in",
+      number: "8851020767",
+      room: "CSE Dept.",
+      timing: "9 to 4",
+    };
+
+    const contactDetails = {
+      email: club.contactEmail || defaultContact.email,
+      number: defaultContact.number,
+      room: defaultContact.room,
+      timing: defaultContact.timing,
+    };
+
+    res.json(contactDetails);
+  } catch (err) {
+    console.error("Error fetching club contact details:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Create Attendance Record
+app.post("/api/attendance", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
+  const { club, date, lectureNumber, attendance, stats } = req.body;
+  if (!club || !date || !lectureNumber || !attendance || !stats) {
+    return res.status(400).json({ error: "All fields are required" });
+  }
+
+  try {
+    const clubDoc = await Club.findById(club);
+    if (!clubDoc) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    const attendanceRecord = new Attendance({
+      club,
+      date,
+      lectureNumber,
+      attendance: Object.entries(attendance).map(([userId, status]) => ({
+        userId,
+        status,
+      })),
+      stats,
+      createdBy: req.user.id,
+    });
+    await attendanceRecord.save();
+
+    const members = await User.find({ clubName: clubDoc.name });
+    for (const member of members) {
+      const status = attendanceRecord.attendance.find(
+        (entry) => entry.userId.toString() === member._id.toString()
+      )?.status;
+      if (status) {
+        await Notification.create({
+          userId: member._id,
+          message: `Your attendance for ${clubDoc.name} (Lecture ${lectureNumber}, ${date}) was marked as ${status}.`,
+          type: "attendance",
+        });
+      }
+    }
+
+    res.status(201).json({ message: "Attendance recorded successfully", attendance: attendanceRecord });
+  } catch (err) {
+    console.error("Attendance creation error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Get Attendance Records
+app.get("/api/attendance", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
+  try {
+    const { club, date, lectureNumber } = req.query;
+    const query = {};
+    if (club) query.club = club;
+    if (date) query.date = date;
+    if (lectureNumber) query.lectureNumber = Number(lectureNumber);
+
+    const user = await User.findById(req.user.id);
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (!user.isAdmin && !superAdminEmails.includes(user.email)) {
+      const clubs = await Club.find({
+        superAdmins: user._id,
+      }).distinct("_id");
+      query.club = { $in: clubs };
+    }
+
+    const attendanceRecords = await Attendance.find(query)
+      .populate("club", "name")
+      .populate("createdBy", "name email")
+      .populate("attendance.userId", "name email rollNo");
+    res.json(attendanceRecords);
+  } catch (err) {
+    console.error("Error fetching attendance records:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
