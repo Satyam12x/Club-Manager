@@ -21,7 +21,7 @@ app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, "Uploads");
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(UploadsDir);
+  fs.mkdirSync(UploadsDir, { recursive: true });
 }
 
 // Multer configuration
@@ -53,7 +53,10 @@ const upload = multer({
 
 // MongoDB Connection
 mongoose
-  .connect(process.env.MONGO_URI)
+  .connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
@@ -187,21 +190,12 @@ const MembershipRequest = mongoose.model(
   membershipRequestSchema
 );
 
-// Attendance Schema
+// Attendance Schema (Aligned with frontend)
 const attendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   date: { type: String, required: true },
   lectureNumber: { type: Number, required: true },
-  attendance: [
-    {
-      userId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
-        required: true,
-      },
-      status: { type: String, enum: ["present", "absent"], required: true },
-    },
-  ],
+  attendance: { type: Map, of: String, required: true },
   stats: {
     presentCount: { type: Number, default: 0 },
     absentCount: { type: Number, default: 0 },
@@ -249,201 +243,300 @@ const generateOtp = () =>
 const otpStore = {};
 
 // Middleware to verify JWT
-const authenticateToken = (req, res, next) => {
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  if (!token) {
+    console.log("authenticateToken: No token provided");
+    return res
+      .status(401)
+      .json({ success: false, error: "Unauthorized: No token provided" });
+  }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Invalid or expired token" });
-    req.user = user;
-    next();
-  });
-};
-
-// Middleware to check admin
-const isAdmin = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (!user || !user.isAdmin) {
-      return res.status(403).json({ error: "Admin access required" });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select("-password");
+    if (!user) {
+      console.log("authenticateToken: User not found for token");
+      return res
+        .status(401)
+        .json({ success: false, error: "Unauthorized: Invalid token" });
     }
+    req.user = user;
+    console.log("authenticateToken: User authenticated", {
+      userId: user._id,
+      email: user.email,
+    });
     next();
   } catch (err) {
-    console.error("Admin check error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("authenticateToken: Error verifying token:", err.message);
+    res
+      .status(401)
+      .json({ success: false, error: "Unauthorized: Invalid or expired token" });
+  }
+};
+
+// Middleware to check global admin
+const isAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      console.log("isAdmin: User not found", { userId: req.user._id });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
+    }
+    if (!user.isAdmin) {
+      console.log("isAdmin: User is not an admin", { userId: user._id });
+      return res
+        .status(403)
+        .json({ success: false, error: "Admin access required" });
+    }
+    console.log("isAdmin: User is admin", { userId: user._id });
+    next();
+  } catch (err) {
+    console.error("isAdmin: Error", err.message);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during admin check" });
   }
 };
 
 // Middleware to check super admin or admin
 const isSuperAdminOrAdmin = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user._id);
     if (!user) {
-      console.error("isSuperAdminOrAdmin: User not found for ID:", req.user.id);
-      return res.status(404).json({ error: "User not found" });
+      console.log("isSuperAdminOrAdmin: User not found", {
+        userId: req.user._id,
+      });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
+
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
 
     // Check if user is a global admin or super admin
     if (user.isAdmin || superAdminEmails.includes(user.email)) {
-      console.log(
-        "isSuperAdminOrAdmin: User is global admin or super admin:",
-        user.email
-      );
+      console.log("isSuperAdminOrAdmin: User is global admin or super admin", {
+        userId: user._id,
+        email: user.email,
+      });
       return next();
     }
 
     // Check club-specific access
-    const clubId = req.body.club || req.query.club;
+    const clubId = req.query.club || req.body.club;
     if (!clubId) {
-      console.error("isSuperAdminOrAdmin: Club ID not provided in request");
-      return res.status(400).json({ error: "Club ID is required" });
+      console.log("isSuperAdminOrAdmin: Club ID not provided");
+      return res
+        .status(400)
+        .json({ success: false, error: "Club ID is required" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(clubId)) {
+      console.log("isSuperAdminOrAdmin: Invalid club ID", { clubId });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid club ID" });
     }
 
     const club = await Club.findById(clubId);
     if (!club) {
-      console.error("isSuperAdminOrAdmin: Club not found for ID:", clubId);
-      return res.status(404).json({ error: "Club not found" });
+      console.log("isSuperAdminOrAdmin: Club not found", { clubId });
+      return res
+        .status(404)
+        .json({ success: false, error: "Club not found" });
     }
 
-    // Check if user is a super admin for the club or a head coordinator (strict check)
+    // Check if user is a super admin or head coordinator for the club
     if (
       club.superAdmins.some((id) => id.toString() === user._id.toString()) ||
       user.headCoordinatorClubs.includes(club.name)
     ) {
-      console.log(
-        "isSuperAdminOrAdmin: User authorized for club:",
-        club.name,
-        "as",
-        club.superAdmins.some((id) => id.toString() === user._id.toString())
+      console.log("isSuperAdminOrAdmin: User authorized for club", {
+        clubId,
+        clubName: club.name,
+        role: club.superAdmins.some((id) => id.toString() === user._id.toString())
           ? "SuperAdmin"
-          : "HeadCoordinator"
-      );
+          : "HeadCoordinator",
+      });
       return next();
     }
 
-    console.error(
-      "isSuperAdminOrAdmin: User not authorized for club:",
-      club.name,
-      "User ID:",
-      user._id,
-      "HeadCoordinatorClubs:",
-      user.headCoordinatorClubs
-    );
-    res.status(403).json({ error: "Super admin or admin access required" });
+    console.log("isSuperAdminOrAdmin: User not authorized for club", {
+      userId: user._id,
+      clubId,
+      clubName: club.name,
+    });
+    res.status(403).json({
+      success: false,
+      error: "Super admin or head coordinator access required",
+    });
   } catch (err) {
-    console.error("isSuperAdminOrAdmin error:", {
+    console.error("isSuperAdminOrAdmin: Error", {
       message: err.message,
       stack: err.stack,
-      userId: req.user?.id,
-      clubId: req.body.club || req.query.club,
+      userId: req.user?._id,
+      clubId: req.query.club || req.body.club,
     });
-    res.status(500).json({ error: "Server error" });
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during authorization" });
   }
 };
 
-// Modified Middleware to check super admin (global or club-specific)
+// Middleware to check super admin (global or club-specific)
 const isSuperAdmin = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user._id);
     if (!user) {
-      console.error("isSuperAdmin: User not found for ID:", req.user.id);
-      return res.status(404).json({ error: "User not found" });
+      console.log("isSuperAdmin: User not found", { userId: req.user._id });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
+
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
+
     // Check if user is a global super admin
     if (superAdminEmails.includes(user.email)) {
-      console.log("isSuperAdmin: User is global super admin:", user.email);
+      console.log("isSuperAdmin: User is global super admin", {
+        userId: user._id,
+        email: user.email,
+      });
       return next();
     }
+
     // Check for club-specific super admin
-    const clubId = req.params.id || req.body.club;
+    const clubId = req.params.id || req.body.club || req.query.club;
     if (!clubId) {
-      console.error("isSuperAdmin: Club ID not provided in request");
-      return res.status(400).json({ error: "Club ID is required" });
+      console.log("isSuperAdmin: Club ID not provided");
+      return res
+        .status(400)
+        .json({ success: false, error: "Club ID is required" });
     }
+
+    if (!mongoose.Types.ObjectId.isValid(clubId)) {
+      console.log("isSuperAdmin: Invalid club ID", { clubId });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid club ID" });
+    }
+
     const club = await Club.findById(clubId);
     if (!club) {
-      console.error("isSuperAdmin: Club not found for ID:", clubId);
-      return res.status(404).json({ error: "Club not found" });
+      console.log("isSuperAdmin: Club not found", { clubId });
+      return res
+        .status(404)
+        .json({ success: false, error: "Club not found" });
     }
-    if (
-      club.superAdmins.map((id) => id.toString()).includes(user._id.toString())
-    ) {
-      console.log("isSuperAdmin: User is super admin for club:", club.name);
+
+    if (club.superAdmins.some((id) => id.toString() === user._id.toString())) {
+      console.log("isSuperAdmin: User is super admin for club", {
+        clubId,
+        clubName: club.name,
+      });
       return next();
     }
-    console.error(
-      "isSuperAdmin: User not authorized for club:",
-      club.name,
-      "User ID:",
-      user._id
-    );
-    res
-      .status(403)
-      .json({ error: "Super admin access required for this club" });
+
+    console.log("isSuperAdmin: User not authorized for club", {
+      userId: user._id,
+      clubId,
+      clubName: club.name,
+    });
+    res.status(403).json({
+      success: false,
+      error: "Super admin access required for this club",
+    });
   } catch (err) {
-    console.error("Super admin check error:", {
+    console.error("isSuperAdmin: Error", {
       message: err.message,
       stack: err.stack,
-      userId: req.user?.id,
-      clubId: req.params.id || req.body.club,
+      userId: req.user?._id,
+      clubId: req.params.id || req.body.club || req.query.club,
     });
-    res.status(500).json({ error: "Server error" });
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during super admin check" });
   }
 };
 
 // Middleware to check head coordinator or admin
 const isHeadCoordinatorOrAdmin = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
-    const clubId = req.params.id || req.body.club;
-    const club = clubId ? await Club.findById(clubId) : null;
+    const user = await User.findById(req.user._id);
     if (!user) {
-      console.error(
-        "isHeadCoordinatorOrAdmin: User not found for ID:",
-        req.user.id
-      );
-      return res.status(404).json({ error: "User not found" });
-    }
-    if (
-      club &&
-      !user.isAdmin &&
-      (!user.isHeadCoordinator ||
-        !user.headCoordinatorClubs.includes(club.name))
-    ) {
-      console.error(
-        "isHeadCoordinatorOrAdmin: User not authorized for club:",
-        club.name,
-        "User ID:",
-        user._id,
-        "HeadCoordinatorClubs:",
-        user.headCoordinatorClubs
-      );
+      console.log("isHeadCoordinatorOrAdmin: User not found", {
+        userId: req.user._id,
+      });
       return res
-        .status(403)
-        .json({ error: "Head coordinator or admin access required" });
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
-    console.log(
-      "isHeadCoordinatorOrAdmin: User authorized for club:",
-      club?.name || "N/A",
-      "as",
-      user.isAdmin ? "Admin" : "HeadCoordinator"
-    );
-    next();
+
+    if (user.isAdmin) {
+      console.log("isHeadCoordinatorOrAdmin: User is global admin", {
+        userId: user._id,
+      });
+      return next();
+    }
+
+    const clubId = req.params.id || req.body.club || req.query.club;
+    if (!clubId) {
+      console.log("isHeadCoordinatorOrAdmin: Club ID not provided");
+      return res
+        .status(400)
+        .json({ success: false, error: "Club ID is required" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(clubId)) {
+      console.log("isHeadCoordinatorOrAdmin: Invalid club ID", { clubId });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid club ID" });
+    }
+
+    const club = await Club.findById(clubId);
+    if (!club) {
+      console.log("isHeadCoordinatorOrAdmin: Club not found", { clubId });
+      return res
+        .status(404)
+        .json({ success: false, error: "Club not found" });
+    }
+
+    if (user.headCoordinatorClubs.includes(club.name)) {
+      console.log("isHeadCoordinatorOrAdmin: User is head coordinator for club", {
+        clubId,
+        clubName: club.name,
+      });
+      return next();
+    }
+
+    console.log("isHeadCoordinatorOrAdmin: User not authorized for club", {
+      userId: user._id,
+      clubId,
+      clubName: club.name,
+    });
+    res.status(403).json({
+      success: false,
+      error: "Head coordinator or admin access required",
+    });
   } catch (err) {
-    console.error("Head coordinator check error:", {
+    console.error("isHeadCoordinatorOrAdmin: Error", {
       message: err.message,
       stack: err.stack,
-      userId: req.user?.id,
-      clubId: req.params.id || req.body.club,
+      userId: req.user?._id,
+      clubId: req.params.id || req.body.club || req.query.club,
     });
-    res.status(500).json({ error: "Server error" });
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during authorization" });
   }
 };
 
@@ -451,7 +544,10 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
 app.post("/api/auth/send-otp", async (req, res) => {
   const { email } = req.body;
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: "Invalid email address" });
+    console.log("send-otp: Invalid email address", { email });
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid email address" });
   }
 
   const otp = generateOtp();
@@ -464,84 +560,107 @@ app.post("/api/auth/send-otp", async (req, res) => {
       subject: "Your ACEM OTP",
       text: `Your OTP for ACEM is ${otp}. It is valid for 10 minutes.`,
     });
-    console.log(`OTP ${otp} sent to ${email}`);
-    res.json({ message: "OTP sent successfully" });
+    console.log("send-otp: OTP sent", { email, otp });
+    res.json({ success: true, data: { message: "OTP sent successfully" } });
   } catch (err) {
-    console.error("Nodemailer sendMail error:", {
+    console.error("send-otp: Nodemailer error", {
       message: err.message,
       code: err.code,
-      response: err.response,
     });
-    res.status(500).json({ error: `Failed to send OTP: ${err.message}` });
+    res
+      .status(500)
+      .json({ success: false, error: `Failed to send OTP: ${err.message}` });
   }
 });
 
 app.post("/api/auth/verify-otp", async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp || otpStore[email] !== otp) {
-    return res.status(400).json({ error: "Invalid OTP" });
+    console.log("verify-otp: Invalid OTP", { email, otp });
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid OTP" });
   }
 
   delete otpStore[email];
 
   let user = await User.findOne({ email });
   if (!user) {
-    return res.json({ message: "OTP verified, proceed to set password" });
+    console.log("verify-otp: User not found, proceed to signup", { email });
+    return res.json({
+      success: true,
+      data: { message: "OTP verified, proceed to set password" },
+    });
   }
 
   const token = jwt.sign(
     { id: user._id, email: user.email },
     process.env.JWT_SECRET,
-    {
-      expiresIn: "1d",
-    }
+    { expiresIn: "1d" }
   );
-  res.json({ token });
+  console.log("verify-otp: OTP verified, token generated", {
+    userId: user._id,
+    email,
+  });
+  res.json({ success: true, data: { token } });
 });
 
 app.post("/api/auth/login-password", async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
+    console.log("login-password: Missing email or password", req.body);
+    return res
+      .status(400)
+      .json({ success: false, error: "Email and password are required" });
   }
 
   const user = await User.findOne({ email });
   if (!user) {
-    return res.status(400).json({ error: "User not found" });
+    console.log("login-password: User not found", { email });
+    return res
+      .status(400)
+      .json({ success: false, error: "User not found" });
   }
 
   const isMatch = await user.comparePassword(password);
   if (!isMatch) {
-    return res.status(400).json({ error: "Invalid password" });
+    console.log("login-password: Invalid password", { email });
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid password" });
   }
 
   const token = jwt.sign(
     { id: user._id, email: user.email },
     process.env.JWT_SECRET,
-    {
-      expiresIn: "1d",
-    }
+    { expiresIn: "1d" }
   );
-  res.json({ token });
+  console.log("login-password: Login successful", { userId: user._id, email });
+  res.json({ success: true, data: { token, user } });
 });
 
 app.post("/api/auth/signup", async (req, res) => {
   const { name, email, password, mobile, rollNo } = req.body;
   if (!name || !email || !password) {
+    console.log("signup: Missing required fields", req.body);
     return res
       .status(400)
-      .json({ error: "Name, email, and password are required" });
+      .json({ success: false, error: "Name, email, and password are required" });
   }
   if (password.length < 6) {
+    console.log("signup: Password too short", { email });
     return res
       .status(400)
-      .json({ error: "Password must be at least 6 characters" });
+      .json({ success: false, error: "Password must be at least 6 characters" });
   }
 
   try {
     let user = await User.findOne({ email });
     if (user) {
-      return res.status(400).json({ error: "User already exists" });
+      console.log("signup: User already exists", { email });
+      return res
+        .status(400)
+        .json({ success: false, error: "User already exists" });
     }
 
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
@@ -567,68 +686,87 @@ app.post("/api/auth/signup", async (req, res) => {
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      {
-        expiresIn: "1d",
-      }
+      { expiresIn: "1d" }
     );
-    res.json({ token });
+    console.log("signup: User created", { userId: user._id, email });
+    res.json({ success: true, data: { token } });
   } catch (err) {
-    console.error("Signup error:", err);
+    console.error("signup: Error", err);
     if (err.name === "ValidationError") {
       return res
         .status(400)
-        .json({ error: `Validation error: ${err.message}` });
+        .json({ success: false, error: `Validation error: ${err.message}` });
     }
     if (err.code === 11000) {
       return res.status(400).json({
+        success: false,
         error:
           "Duplicate key error: email, mobile, or roll number already exists",
       });
     }
-    res.status(500).json({ error: "Signup failed: Internal server error" });
+    res
+      .status(500)
+      .json({ success: false, error: "Signup failed: Internal server error" });
   }
 });
 
 app.post("/api/auth/verify-otp-login", async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp || otpStore[email] !== otp) {
-    return res.status(400).json({ error: "Invalid OTP" });
+    console.log("verify-otp-login: Invalid OTP", { email, otp });
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid OTP" });
   }
 
   delete otpStore[email];
 
   const user = await User.findOne({ email });
   if (!user) {
-    return res.status(400).json({ error: "User not found" });
+    console.log("verify-otp-login: User not found", { email });
+    return res
+      .status(400)
+      .json({ success: false, error: "User not found" });
   }
 
   const token = jwt.sign(
     { id: user._id, email: user.email },
     process.env.JWT_SECRET,
-    {
-      expiresIn: "1d",
-    }
+    { expiresIn: "1d" }
   );
-  res.json({ token });
+  console.log("verify-otp-login: OTP verified, token generated", {
+    userId: user._id,
+    email,
+  });
+  res.json({ success: true, data: { token } });
 });
 
 // User Profile Update
 app.put("/api/auth/user", authenticateToken, async (req, res) => {
   const { name, email, phone } = req.body;
   if (!name || !email) {
-    return res.status(400).json({ error: "Name and email are required" });
+    console.log("update-user: Missing required fields", req.body);
+    return res
+      .status(400)
+      .json({ success: false, error: "Name and email are required" });
   }
 
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      console.log("update-user: User not found", { userId: req.user._id });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
 
     if (email !== user.email) {
       const existingUser = await User.findOne({ email });
       if (existingUser) {
-        return res.status(400).json({ error: "Email already in use" });
+        console.log("update-user: Email already in use", { email });
+        return res
+          .status(400)
+          .json({ success: false, error: "Email already in use" });
       }
     }
 
@@ -637,7 +775,6 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
     user.phone = phone || user.phone;
     await user.save();
 
-    // Update headCoordinators in clubs if email changed
     if (email !== req.user.email) {
       await Club.updateMany(
         { headCoordinators: req.user.email },
@@ -648,19 +785,23 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      {
-        expiresIn: "1d",
-      }
+      { expiresIn: "1d" }
     );
-    res.json({ message: "Profile updated successfully", user, token });
+    console.log("update-user: Profile updated", { userId: user._id, email });
+    res.json({
+      success: true,
+      data: { message: "Profile updated successfully", user, token },
+    });
   } catch (err) {
-    console.error("Profile update error:", err);
+    console.error("update-user: Error", err);
     if (err.code === 11000) {
       return res
         .status(400)
-        .json({ error: "Duplicate key error: email or phone already exists" });
+        .json({ success: false, error: "Email or phone already exists" });
     }
-    res.status(500).json({ error: "Server error" });
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during profile update" });
   }
 });
 
@@ -669,20 +810,28 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
   const { semester, course, specialization, isClubMember, clubName, rollNo } =
     req.body;
   if (!semester || !course || !specialization) {
+    console.log("user-details: Missing required fields", req.body);
     return res
       .status(400)
-      .json({ error: "Semester, course, and specialization are required" });
+      .json({
+        success: false,
+        error: "Semester, course, and specialization are required",
+      });
   }
   if (isClubMember && (!clubName || clubName.length === 0)) {
+    console.log("user-details: Missing club names for club member", req.body);
     return res
       .status(400)
-      .json({ error: "Club names are required if you are a club member" });
+      .json({ success: false, error: "Club names are required if you are a club member" });
   }
 
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      console.log("user-details: User not found", { userId: req.user._id });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
 
     user.semester = semester;
@@ -693,10 +842,16 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
     user.clubName = isClubMember ? clubName : [];
     await user.save();
 
-    res.status(200).json({ message: "User details saved successfully" });
+    console.log("user-details: User details saved", { userId: user._id });
+    res.json({
+      success: true,
+      data: { message: "User details saved successfully" },
+    });
   } catch (err) {
-    console.error("User details error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("user-details: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during user details update" });
   }
 });
 
@@ -704,22 +859,29 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
 app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
   const { clubName, isClubMember } = req.body;
   if (!clubName || !Array.isArray(clubName)) {
-    return res.status(400).json({ error: "clubName must be an array" });
+    console.log("patch-user-details: Invalid clubName", req.body);
+    return res
+      .status(400)
+      .json({ success: false, error: "clubName must be an array" });
   }
 
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      console.log("patch-user-details: User not found", { userId: req.user._id });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
 
     const validClubs = await Club.find({ name: { $in: clubName } }).distinct(
       "name"
     );
     if (clubName.some((name) => !validClubs.includes(name))) {
+      console.log("patch-user-details: Invalid club names", { clubName });
       return res
         .status(400)
-        .json({ error: "One or more club names are invalid" });
+        .json({ success: false, error: "One or more club names are invalid" });
     }
 
     user.clubName = [...new Set([...user.clubName, ...clubName])];
@@ -727,36 +889,48 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
       isClubMember !== undefined ? isClubMember : user.clubName.length > 0;
     await user.save();
 
-    // Update memberCount for each club
     for (const name of clubName) {
       await Club.updateOne({ name }, { $inc: { memberCount: 1 } });
     }
 
-    // Notify user of successful club join
     await Notification.create({
       userId: user._id,
       message: `You have successfully joined ${clubName.join(", ")}.`,
       type: "membership",
     });
 
-    res.status(200).json({ message: "Club joined successfully" });
+    console.log("patch-user-details: Clubs joined", {
+      userId: user._id,
+      clubName,
+    });
+    res.json({ success: true, data: { message: "Club joined successfully" } });
   } catch (err) {
-    console.error("Error updating user details:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("patch-user-details: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during club join" });
   }
 });
 
 // Get User Data
 app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select(
+    const user = await User.findById(req.user._id).select(
       "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo"
     );
-    if (!user) return res.status(404).json({ error: "User not found" });
-    res.json(user);
+    if (!user) {
+      console.log("get-user: User not found", { userId: req.user._id });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
+    }
+    console.log("get-user: User fetched", { userId: user._id });
+    res.json({ success: true, data: user });
   } catch (err) {
-    console.error("Error fetching user:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-user: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching user data" });
   }
 });
 
@@ -766,10 +940,13 @@ app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
     const users = await User.find().select(
       "name email mobile semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs createdAt rollNo"
     );
-    res.json(users);
+    console.log("get-users: Fetched users", { count: users.length });
+    res.json({ success: true, data: users });
   } catch (err) {
-    console.error("Error fetching users:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-users: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching users" });
   }
 });
 
@@ -794,10 +971,13 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
         };
       })
     );
-    res.json(transformedClubs);
+    console.log("get-clubs: Fetched clubs", { count: transformedClubs.length });
+    res.json({ success: true, data: transformedClubs });
   } catch (err) {
-    console.error("Error fetching clubs:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-clubs: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching clubs" });
   }
 });
 
@@ -820,24 +1000,36 @@ app.post(
       superAdmins,
     } = req.body;
     if (!name || !description || !category || !req.files.icon) {
+      console.log("create-club: Missing required fields", req.body);
       return res
         .status(400)
-        .json({ error: "Name, description, category, and icon are required" });
+        .json({
+          success: false,
+          error: "Name, description, category, and icon are required",
+        });
     }
     if (
-      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-        category
-      )
+      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)
     ) {
-      return res.status(400).json({ error: "Invalid category" });
-    }
-    if (description.length > 500) {
+      console.log("create-club: Invalid category", { category });
       return res
         .status(400)
-        .json({ error: "Description must be 500 characters or less" });
+        .json({ success: false, error: "Invalid category" });
+    }
+    if (description.length > 500) {
+      console.log("create-club: Description too long", { description });
+      return res
+        .status(400)
+        .json({
+          success: false,
+          error: "Description must be 500 characters or less",
+        });
     }
     if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
-      return res.status(400).json({ error: "Invalid contact email" });
+      console.log("create-club: Invalid contact email", { contactEmail });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid contact email" });
     }
 
     try {
@@ -860,16 +1052,20 @@ app.post(
         );
       }
 
-      let validSuperAdmins = [req.user.id]; // Add creator as super admin
+      let validSuperAdmins = [req.user._id];
       if (superAdmins) {
         const adminIds = superAdmins
           .split(",")
           .map((id) => id.trim())
-          .filter((id) => id && id !== req.user.id);
+          .filter((id) => id && id !== req.user._id.toString());
         if (adminIds.length + 1 > 2) {
+          console.log("create-club: Too many super admins", { adminIds });
           return res
             .status(400)
-            .json({ error: "A club can have at most 2 super admins" });
+            .json({
+              success: false,
+              error: "A club can have at most 2 super admins",
+            });
         }
         const users = await User.find({ _id: { $in: adminIds } });
         validSuperAdmins = [
@@ -877,9 +1073,10 @@ app.post(
           ...users.map((user) => user._id),
         ];
         if (validSuperAdmins.length !== adminIds.length + 1) {
+          console.log("create-club: Invalid super admin IDs", { adminIds });
           return res
             .status(400)
-            .json({ error: "One or more super admin IDs are invalid" });
+            .json({ success: false, error: "One or more super admin IDs are invalid" });
         }
       }
 
@@ -897,7 +1094,6 @@ app.post(
       });
       await club.save();
 
-      // Notify super admins
       const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
         ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
         : [];
@@ -923,20 +1119,25 @@ app.post(
           ? `http://localhost:5000/${populatedClub.banner}`
           : null,
       };
-      res
-        .status(201)
-        .json({ message: "Club created successfully", club: transformedClub });
+      console.log("create-club: Club created", { clubId: club._id, name });
+      res.status(201).json({
+        success: true,
+        data: { message: "Club created successfully", club: transformedClub },
+      });
     } catch (err) {
-      console.error("Club creation error:", err);
+      console.error("create-club: Error", err);
       if (err.code === 11000) {
-        return res.status(400).json({ error: "Club name already exists" });
+        return res
+          .status(400)
+          .json({ success: false, error: "Club name already exists" });
       }
-      res.status(500).json({ error: "Server error" });
+      res
+        .status(500)
+        .json({ success: false, error: "Server error during club creation" });
     }
-  }
-);
+});
 
-// Modified Update Club (Super Admin only)
+// Update Club (Super Admin only)
 app.patch(
   "/api/clubs/:id",
   authenticateToken,
@@ -956,22 +1157,35 @@ app.patch(
     } = req.body;
 
     if (req.body.name) {
-      return res.status(400).json({ error: "Club name cannot be updated" });
+      console.log("update-club: Attempt to update club name", { clubId: id });
+      return res
+        .status(400)
+        .json({ success: false, error: "Club name cannot be updated" });
     }
 
     try {
       const club = await Club.findById(id);
       if (!club) {
-        return res.status(404).json({ error: "Club not found" });
+        console.log("update-club: Club not found", { clubId: id });
+        return res
+          .status(404)
+          .json({ success: false, error: "Club not found" });
       }
 
       if (description && description.length > 500) {
+        console.log("update-club: Description too long", { description });
         return res
           .status(400)
-          .json({ error: "Description must be 500 characters or less" });
+          .json({
+            success: false,
+            error: "Description must be 500 characters or less",
+          });
       }
       if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
-        return res.status(400).json({ error: "Invalid contact email" });
+        console.log("update-club: Invalid contact email", { contactEmail });
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid contact email" });
       }
 
       let validHeadCoordinators = club.headCoordinators;
@@ -1018,16 +1232,24 @@ app.patch(
               .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
+          console.log("update-club: Too many super admins", { adminIds });
           return res
             .status(400)
-            .json({ error: "A club can have at most 2 super admins" });
+            .json({
+              success: false,
+              error: "A club can have at most 2 super admins",
+            });
         }
         const users = await User.find({ _id: { $in: adminIds } });
         validSuperAdmins = users.map((user) => user._id);
         if (validSuperAdmins.length !== adminIds.length) {
+          console.log("update-club: Invalid super admin IDs", { adminIds });
           return res
             .status(400)
-            .json({ error: "One or more super admin IDs are invalid" });
+            .json({
+              success: false,
+              error: "One or more super admin IDs are invalid",
+            });
         }
       }
 
@@ -1047,7 +1269,10 @@ app.patch(
             category
           )
         ) {
-          return res.status(400).json({ error: "Invalid category" });
+          console.log("update-club: Invalid category", { category });
+          return res
+            .status(400)
+            .json({ success: false, error: "Invalid category" });
         }
         club.category = category;
       }
@@ -1087,22 +1312,28 @@ app.patch(
         icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
         banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
       };
-      res
-        .status(200)
-        .json({ message: "Club updated successfully", club: transformedClub });
+      console.log("update-club: Club updated", { clubId: club._id });
+      res.json({
+        success: true,
+        data: { message: "Club updated successfully", club: transformedClub },
+      });
     } catch (err) {
-      console.error("Club update error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("update-club: Error", err);
+      res
+        .status(500)
+        .json({ success: false, error: "Server error during club update" });
     }
-  }
-);
+});
 
 // Delete Club (Admin only)
 app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
   try {
     const club = await Club.findById(req.params.id);
     if (!club) {
-      return res.status(404).json({ error: "Club not found" });
+      console.log("delete-club: Club not found", { clubId: req.params.id });
+      return res
+        .status(404)
+        .json({ success: false, error: "Club not found" });
     }
 
     const members = await User.find({ clubName: club.name });
@@ -1146,10 +1377,13 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
       });
     }
 
-    res.json({ message: "Club deleted successfully" });
+    console.log("delete-club: Club deleted", { clubId: club._id });
+    res.json({ success: true, data: { message: "Club deleted successfully" } });
   } catch (err) {
-    console.error("Club deletion error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("delete-club: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during club deletion" });
   }
 });
 
@@ -1159,24 +1393,38 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
   try {
     const club = await Club.findById(id);
     if (!club) {
-      return res.status(404).json({ error: "Club not found" });
+      console.log("join-club: Club not found", { clubId: id });
+      return res
+        .status(404)
+        .json({ success: false, error: "Club not found" });
     }
 
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      console.log("join-club: User not found", { userId: req.user._id });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
 
     if (user.clubName.includes(club.name)) {
+      console.log("join-club: User already a member", {
+        userId: user._id,
+        clubName: club.name,
+      });
       return res
         .status(400)
-        .json({ error: "You are already a member of this club" });
+        .json({ success: false, error: "You are already a member of this club" });
     }
 
     if (user.pendingClubs.includes(club.name)) {
+      console.log("join-club: Membership request already pending", {
+        userId: user._id,
+        clubName: club.name,
+      });
       return res
         .status(400)
-        .json({ error: "Membership request already pending" });
+        .json({ success: false, error: "Membership request already pending" });
     }
 
     const membershipRequest = new MembershipRequest({
@@ -1207,28 +1455,47 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
       type: "membership",
     });
 
-    res.json({ message: "Membership request sent successfully" });
+    console.log("join-club: Membership request sent", {
+      userId: user._id,
+      clubName: club.name,
+    });
+    res.json({
+      success: true,
+      data: { message: "Membership request sent successfully" },
+    });
   } catch (err) {
-    console.error("Error requesting club membership:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("join-club: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error during membership request" });
   }
 });
 
 // Get Membership Requests
 app.get("/api/membership-requests", authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      console.log("get-membership-requests: User not found", {
+        userId: req.user._id,
+      });
+      return res
+        .status(404)
+        .json({ success: false, error: "User not found" });
     }
 
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
     let query = {};
-    if (!superAdminEmails.includes(user.email)) {
+    if (!superAdminEmails.includes(user.email) && !user.isAdmin) {
       if (!user.isHeadCoordinator || !user.headCoordinatorClubs.length) {
-        return res.status(403).json({ error: "Access denied" });
+        console.log("get-membership-requests: User not authorized", {
+          userId: user._id,
+        });
+        return res
+          .status(403)
+          .json({ success: false, error: "Access denied" });
       }
       query.clubName = { $in: user.headCoordinatorClubs };
     }
@@ -1237,10 +1504,15 @@ app.get("/api/membership-requests", authenticateToken, async (req, res) => {
       "userId",
       "name email mobile"
     );
-    res.json(requests);
+    console.log("get-membership-requests: Fetched requests", {
+      count: requests.length,
+    });
+    res.json({ success: true, data: requests });
   } catch (err) {
-    console.error("Error fetching membership requests:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-membership-requests: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching membership requests" });
   }
 });
 
@@ -1252,18 +1524,31 @@ app.patch(
     const { id } = req.params;
     const { status } = req.body;
     if (!["approved", "rejected"].includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
+      console.log("update-membership-request: Invalid status", { status });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid status" });
     }
 
     try {
       const request = await MembershipRequest.findById(id);
       if (!request) {
-        return res.status(404).json({ error: "Membership request not found" });
+        console.log("update-membership-request: Request not found", {
+          requestId: id,
+        });
+        return res
+          .status(404)
+          .json({ success: false, error: "Membership request not found" });
       }
 
-      const user = await User.findById(req.user.id);
+      const user = await User.findById(req.user._id);
       if (!user) {
-        return res.status(404).json({ error: "User not found" });
+        console.log("update-membership-request: User not found", {
+          userId: req.user._id,
+        });
+        return res
+          .status(404)
+          .json({ success: false, error: "User not found" });
       }
 
       const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
@@ -1271,10 +1556,16 @@ app.patch(
         : [];
       if (
         !superAdminEmails.includes(user.email) &&
-        (!user.isHeadCoordinator ||
-          !user.headCoordinatorClubs.includes(request.clubName))
+        !user.isAdmin &&
+        !user.headCoordinatorClubs.includes(request.clubName)
       ) {
-        return res.status(403).json({ error: "Access denied" });
+        console.log("update-membership-request: User not authorized", {
+          userId: user._id,
+          clubName: request.clubName,
+        });
+        return res
+          .status(403)
+          .json({ success: false, error: "Access denied" });
       }
 
       request.status = status;
@@ -1282,7 +1573,12 @@ app.patch(
 
       const targetUser = await User.findById(request.userId);
       if (!targetUser) {
-        return res.status(404).json({ error: "Target user not found" });
+        console.log("update-membership-request: Target user not found", {
+          userId: request.userId,
+        });
+        return res
+          .status(404)
+          .json({ success: false, error: "Target user not found" });
       }
 
       if (status === "approved") {
@@ -1331,10 +1627,22 @@ app.patch(
         });
       }
 
-      res.json({ message: `Membership request ${status} successfully` });
+      console.log("update-membership-request: Request updated", {
+        requestId: id,
+        status,
+      });
+      res.json({
+        success: true,
+        data: { message: `Membership request ${status} successfully` },
+      });
     } catch (err) {
-      console.error("Error updating membership request:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("update-membership-request: Error", err);
+      res
+        .status(500)
+        .json({
+          success: false,
+          error: "Server error during membership request update",
+        });
     }
   }
 );
@@ -1347,7 +1655,10 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
       "name email"
     );
     if (!club) {
-      return res.status(404).json({ error: "Club not found" });
+      console.log("get-club: Club not found", { clubId: req.params.id });
+      return res
+        .status(404)
+        .json({ success: false, error: "Club not found" });
     }
     const members = await User.countDocuments({ clubName: club.name });
     const transformedClub = {
@@ -1356,28 +1667,42 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
       banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
       memberCount: members,
     };
-    res.json(transformedClub);
+    console.log("get-club: Club fetched", { clubId: club._id });
+    res.json({ success: true, data: transformedClub });
   } catch (err) {
-    console.error("Error fetching club:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-club: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching club" });
   }
 });
 
 // Get Club Members
-app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
+app.get("/api/clubs/:clubId/members", authenticateToken, async (req, res) => {
   try {
-    const club = await Club.findById(req.params.id);
+    const club = await Club.findById(req.params.clubId);
     if (!club) {
-      return res.status(404).json({ error: "Club not found" });
+      console.log("get-club-members: Club not found", {
+        clubId: req.params.clubId,
+      });
+      return res
+        .status(404)
+        .json({ success: false, error: "Club not found" });
     }
     const members = await User.find(
       { clubName: club.name },
       "name email mobile phone rollNo"
     ).lean();
-    res.json(members);
+    console.log("get-club-members: Fetched members", {
+      clubId: club._id,
+      count: members.length,
+    });
+    res.json({ success: true, data: members });
   } catch (err) {
-    console.error("Error fetching club members:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-club-members: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching club members" });
   }
 });
 
@@ -1389,24 +1714,39 @@ app.delete(
   async (req, res) => {
     const { email } = req.body;
     if (!email) {
-      return res.status(400).json({ error: "Member email is required" });
+      console.log("remove-club-member: Missing email", req.body);
+      return res
+        .status(400)
+        .json({ success: false, error: "Member email is required" });
     }
 
     try {
       const club = await Club.findById(req.params.id);
       if (!club) {
-        return res.status(404).json({ error: "Club not found" });
+        console.log("remove-club-member: Club not found", {
+          clubId: req.params.id,
+        });
+        return res
+          .status(404)
+          .json({ success: false, error: "Club not found" });
       }
 
       const user = await User.findOne({ email });
       if (!user) {
-        return res.status(404).json({ error: "User not found" });
+        console.log("remove-club-member: User not found", { email });
+        return res
+          .status(404)
+          .json({ success: false, error: "User not found" });
       }
 
       if (!user.clubName.includes(club.name)) {
+        console.log("remove-club-member: User not a member", {
+          userId: user._id,
+          clubName: club.name,
+        });
         return res
           .status(400)
-          .json({ error: "User is not a member of this club" });
+          .json({ success: false, error: "User is not a member of this club" });
       }
 
       user.clubName = user.clubName.filter((name) => name !== club.name);
@@ -1422,10 +1762,19 @@ app.delete(
         type: "membership",
       });
 
-      res.json({ message: "Member removed successfully" });
+      console.log("remove-club-member: Member removed", {
+        userId: user._id,
+        clubName: club.name,
+      });
+      res.json({
+        success: true,
+        data: { message: "Member removed successfully" },
+      });
     } catch (err) {
-      console.error("Error removing club member:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("remove-club-member: Error", err);
+      res
+        .status(500)
+        .json({ success: false, error: "Server error removing club member" });
     }
   }
 );
@@ -1439,15 +1788,29 @@ app.post(
   async (req, res) => {
     const { title, description, date, time, location, club } = req.body;
     if (!title || !description || !date || !time || !location || !club) {
+      console.log("create-event: Missing required fields", req.body);
       return res
         .status(400)
-        .json({ error: "All fields are required except banner" });
+        .json({
+          success: false,
+          error: "All fields are required except banner",
+        });
     }
 
     try {
+      if (!mongoose.Types.ObjectId.isValid(club)) {
+        console.log("create-event: Invalid club ID", { club });
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid club ID" });
+      }
+
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
-        return res.status(404).json({ error: "Club not found" });
+        console.log("create-event: Club not found", { club });
+        return res
+          .status(404)
+          .json({ success: false, error: "Club not found" });
       }
 
       const event = new Event({
@@ -1458,7 +1821,7 @@ app.post(
         location,
         club,
         banner: req.file ? req.file.path : null,
-        createdBy: req.user.id,
+        createdBy: req.user._id,
       });
       await event.save();
 
@@ -1478,10 +1841,13 @@ app.post(
         ...event._doc,
         banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
       };
-      res.status(201).json(transformedEvent);
+      console.log("create-event: Event created", { eventId: event._id });
+      res.status(201).json({ success: true, data: transformedEvent });
     } catch (err) {
-      console.error("Event creation error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("create-event: Error", err);
+      res
+        .status(500)
+        .json({ success: false, error: "Server error during event creation" });
     }
   }
 );
@@ -1491,6 +1857,12 @@ app.get("/api/events", authenticateToken, async (req, res) => {
   try {
     const { club } = req.query;
     const query = club ? { club } : {};
+    if (club && !mongoose.Types.ObjectId.isValid(club)) {
+      console.log("get-events: Invalid club ID", { club });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid club ID" });
+    }
     const events = await Event.find(query)
       .populate("club", "name")
       .populate("createdBy", "name email");
@@ -1498,30 +1870,45 @@ app.get("/api/events", authenticateToken, async (req, res) => {
       ...event._doc,
       banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
     }));
-    res.json(transformedEvents);
+    console.log("get-events: Fetched events", { count: events.length });
+    res.json({ success: true, data: transformedEvents });
   } catch (err) {
-    console.error("Error fetching events:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-events: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching events" });
   }
 });
 
 // Get Single Event
 app.get("/api/events/:id", authenticateToken, async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      console.log("get-event: Invalid event ID", { eventId: req.params.id });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid event ID" });
+    }
     const event = await Event.findById(req.params.id)
       .populate("club", "name")
       .populate("createdBy", "name email");
     if (!event) {
-      return res.status(404).json({ error: "Event not found" });
+      console.log("get-event: Event not found", { eventId: req.params.id });
+      return res
+        .status(404)
+        .json({ success: false, error: "Event not found" });
     }
     const transformedEvent = {
       ...event._doc,
       banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
     };
-    res.json(transformedEvent);
+    console.log("get-event: Event fetched", { eventId: event._id });
+    res.json({ success: true, data: transformedEvent });
   } catch (err) {
-    console.error("Error fetching event:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("get-event: Error", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Server error fetching event" });
   }
 });
 
@@ -1536,20 +1923,43 @@ app.put(
     const { title, description, date, time, location, club } = req.body;
 
     if (!title || !description || !date || !time || !location || !club) {
+      console.log("update-event: Missing required fields", req.body);
       return res
         .status(400)
-        .json({ error: "All fields are required except banner" });
+        .json({
+          success: false,
+          error: "All fields are required except banner",
+        });
     }
 
     try {
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        console.log("update-event: Invalid event ID", { eventId: id });
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid event ID" });
+      }
+      if (!mongoose.Types.ObjectId.isValid(club)) {
+        console.log("update-event: Invalid club ID", { club });
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid club ID" });
+      }
+
       const event = await Event.findById(id);
       if (!event) {
-        return res.status(404).json({ error: "Event not found" });
+        console.log("update-event: Event not found", { eventId: id });
+        return res
+          .status(404)
+          .json({ success: false, error: "Event not found" });
       }
 
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
-        return res.status(404).json({ error: "Club not found" });
+        console.log("update-event: Club not found", { club });
+        return res
+          .status(404)
+          .json({ success: false, error: "Club not found" });
       }
 
       if (req.file && event.banner && fs.existsSync(event.banner)) {
@@ -1578,16 +1988,20 @@ app.put(
         ...event._doc,
         banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
       };
+      console.log("update-event: Event updated", { eventId: event._id });
       res.json({
-        message: "Event updated successfully",
-        event: transformedEvent,
+        success: true,
+        data: { message: "Event updated successfully", event: transformedEvent },
       });
     } catch (err) {
-      console.error("Event update error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("update-event: Error", err);
+      res
+        .status(500)
+        .json({ success: false, error: "Server error during event update" });
     }
   }
 );
+
 
 // Delete Event (Super Admin only)
 app.delete(
