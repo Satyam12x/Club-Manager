@@ -309,7 +309,7 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
       return res.status(404).json({ error: "Club not found" });
     }
 
-    // Check if user is a super admin for the club or a head coordinator
+    // Check if user is a super admin for the club or a head coordinator (strict check)
     if (
       club.superAdmins.some((id) => id.toString() === user._id.toString()) ||
       user.headCoordinatorClubs.includes(club.name)
