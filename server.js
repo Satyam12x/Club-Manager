@@ -280,30 +280,67 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
+      console.error("isSuperAdminOrAdmin: User not found for ID:", req.user.id);
       return res.status(404).json({ error: "User not found" });
     }
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
+
+    // Check if user is a global admin or super admin
     if (user.isAdmin || superAdminEmails.includes(user.email)) {
+      console.log(
+        "isSuperAdminOrAdmin: User is global admin or super admin:",
+        user.email
+      );
       return next();
     }
-    if (req.body.club) {
-      const club = await Club.findById(req.body.club);
-      if (!club) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-      if (
-        club.superAdmins
-          .map((id) => id.toString())
-          .includes(user._id.toString())
-      ) {
-        return next();
-      }
+
+    // Check club-specific access
+    const clubId = req.body.club || req.query.club;
+    if (!clubId) {
+      console.error("isSuperAdminOrAdmin: Club ID not provided in request");
+      return res.status(400).json({ error: "Club ID is required" });
     }
+
+    const club = await Club.findById(clubId);
+    if (!club) {
+      console.error("isSuperAdminOrAdmin: Club not found for ID:", clubId);
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    // Check if user is a super admin for the club or a head coordinator
+    if (
+      club.superAdmins.some((id) => id.toString() === user._id.toString()) ||
+      user.headCoordinatorClubs.includes(club.name)
+    ) {
+      console.log(
+        "isSuperAdminOrAdmin: User authorized for club:",
+        club.name,
+        "as",
+        club.superAdmins.some((id) => id.toString() === user._id.toString())
+          ? "SuperAdmin"
+          : "HeadCoordinator"
+      );
+      return next();
+    }
+
+    console.error(
+      "isSuperAdminOrAdmin: User not authorized for club:",
+      club.name,
+      "User ID:",
+      user._id,
+      "HeadCoordinatorClubs:",
+      user.headCoordinatorClubs
+    );
     res.status(403).json({ error: "Super admin or admin access required" });
   } catch (err) {
-    console.error("Super admin or admin check error:", err);
+    console.error("isSuperAdminOrAdmin error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      clubId: req.body.club || req.query.club,
+    });
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -313,6 +350,7 @@ const isSuperAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
+      console.error("isSuperAdmin: User not found for ID:", req.user.id);
       return res.status(404).json({ error: "User not found" });
     }
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
@@ -320,27 +358,42 @@ const isSuperAdmin = async (req, res, next) => {
       : [];
     // Check if user is a global super admin
     if (superAdminEmails.includes(user.email)) {
+      console.log("isSuperAdmin: User is global super admin:", user.email);
       return next();
     }
     // Check for club-specific super admin
     const clubId = req.params.id || req.body.club;
     if (!clubId) {
+      console.error("isSuperAdmin: Club ID not provided in request");
       return res.status(400).json({ error: "Club ID is required" });
     }
     const club = await Club.findById(clubId);
     if (!club) {
+      console.error("isSuperAdmin: Club not found for ID:", clubId);
       return res.status(404).json({ error: "Club not found" });
     }
     if (
       club.superAdmins.map((id) => id.toString()).includes(user._id.toString())
     ) {
+      console.log("isSuperAdmin: User is super admin for club:", club.name);
       return next();
     }
+    console.error(
+      "isSuperAdmin: User not authorized for club:",
+      club.name,
+      "User ID:",
+      user._id
+    );
     res
       .status(403)
       .json({ error: "Super admin access required for this club" });
   } catch (err) {
-    console.error("Super admin check error:", err);
+    console.error("Super admin check error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      clubId: req.params.id || req.body.club,
+    });
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -352,6 +405,10 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
     const clubId = req.params.id || req.body.club;
     const club = clubId ? await Club.findById(clubId) : null;
     if (!user) {
+      console.error(
+        "isHeadCoordinatorOrAdmin: User not found for ID:",
+        req.user.id
+      );
       return res.status(404).json({ error: "User not found" });
     }
     if (
@@ -360,13 +417,32 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
       (!user.isHeadCoordinator ||
         !user.headCoordinatorClubs.includes(club.name))
     ) {
+      console.error(
+        "isHeadCoordinatorOrAdmin: User not authorized for club:",
+        club.name,
+        "User ID:",
+        user._id,
+        "HeadCoordinatorClubs:",
+        user.headCoordinatorClubs
+      );
       return res
         .status(403)
         .json({ error: "Head coordinator or admin access required" });
     }
+    console.log(
+      "isHeadCoordinatorOrAdmin: User authorized for club:",
+      club?.name || "N/A",
+      "as",
+      user.isAdmin ? "Admin" : "HeadCoordinator"
+    );
     next();
   } catch (err) {
-    console.error("Head coordinator check error:", err);
+    console.error("Head coordinator check error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      clubId: req.params.id || req.body.club,
+    });
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -864,7 +940,7 @@ app.post(
 app.patch(
   "/api/clubs/:id",
   authenticateToken,
-  isSuperAdmin, // Changed to isSuperAdmin
+  isSuperAdmin,
   upload.fields([
     { name: "icon", maxCount: 1 },
     { name: "banner", maxCount: 1 },
@@ -1956,7 +2032,12 @@ app.post(
         attendance: attendanceRecord,
       });
     } catch (err) {
-      console.error("Attendance creation error:", err);
+      console.error("Attendance creation error:", {
+        message: err.message,
+        stack: err.stack,
+        clubId: club,
+        userId: req.user.id,
+      });
       res.status(500).json({ error: "Server error" });
     }
   }
@@ -1976,23 +2057,72 @@ app.get(
       if (lectureNumber) query.lectureNumber = Number(lectureNumber);
 
       const user = await User.findById(req.user.id);
+      if (!user) {
+        console.error("Get attendance: User not found for ID:", req.user.id);
+        return res.status(404).json({ error: "User not found" });
+      }
+
       const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
         ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
         : [];
+
+      // Restrict to authorized clubs for non-global admins
       if (!user.isAdmin && !superAdminEmails.includes(user.email)) {
-        const clubs = await Club.find({
-          superAdmins: user._id,
+        const authorizedClubs = await Club.find({
+          $or: [
+            { superAdmins: user._id },
+            { name: { $in: user.headCoordinatorClubs } },
+          ],
         }).distinct("_id");
-        query.club = { $in: clubs };
+        if (!authorizedClubs.length) {
+          console.error(
+            "Get attendance: User not authorized for any clubs",
+            "User ID:",
+            user._id,
+            "HeadCoordinatorClubs:",
+            user.headCoordinatorClubs
+          );
+          return res
+            .status(403)
+            .json({ error: "Not authorized to view attendance" });
+        }
+        if (
+          club &&
+          !authorizedClubs.map((id) => id.toString()).includes(club)
+        ) {
+          console.error(
+            "Get attendance: User not authorized for club ID:",
+            club,
+            "User ID:",
+            user._id
+          );
+          return res
+            .status(403)
+            .json({ error: "Not authorized for this club" });
+        }
+        query.club = { $in: authorizedClubs };
       }
+
+      console.log(
+        "Get attendance: Querying with",
+        query,
+        "for user",
+        user.email
+      );
 
       const attendanceRecords = await Attendance.find(query)
         .populate("club", "name")
         .populate("createdBy", "name email")
         .populate("attendance.userId", "name email rollNo");
+
       res.json(attendanceRecords);
     } catch (err) {
-      console.error("Error fetching attendance records:", err);
+      console.error("Error fetching attendance records:", {
+        message: err.message,
+        stack: err.stack,
+        userId: req.user?.id,
+        query: req.query,
+      });
       res.status(500).json({ error: "Server error" });
     }
   }
