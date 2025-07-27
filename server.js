@@ -192,10 +192,16 @@ const attendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   date: { type: String, required: true },
   lectureNumber: { type: Number, required: true },
-  attendance: [{
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    status: { type: String, enum: ["present", "absent"], required: true },
-  }],
+  attendance: [
+    {
+      userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+      },
+      status: { type: String, enum: ["present", "absent"], required: true },
+    },
+  ],
   stats: {
     presentCount: { type: Number, default: 0 },
     absentCount: { type: Number, default: 0 },
@@ -302,7 +308,7 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
   }
 };
 
-// Middleware to check super admin (global or club-specific)
+// Modified Middleware to check super admin (global or club-specific)
 const isSuperAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
@@ -312,24 +318,27 @@ const isSuperAdmin = async (req, res, next) => {
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
+    // Check if user is a global super admin
     if (superAdminEmails.includes(user.email)) {
       return next();
     }
-    if (req.params.id || req.body.club) {
-      const clubId = req.params.id || req.body.club;
-      const club = await Club.findById(clubId);
-      if (!club) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-      if (
-        club.superAdmins
-          .map((id) => id.toString())
-          .includes(user._id.toString())
-      ) {
-        return next();
-      }
+    // Check for club-specific super admin
+    const clubId = req.params.id || req.body.club;
+    if (!clubId) {
+      return res.status(400).json({ error: "Club ID is required" });
     }
-    res.status(403).json({ error: "Super admin access required" });
+    const club = await Club.findById(clubId);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+    if (
+      club.superAdmins.map((id) => id.toString()).includes(user._id.toString())
+    ) {
+      return next();
+    }
+    res
+      .status(403)
+      .json({ error: "Super admin access required for this club" });
   } catch (err) {
     console.error("Super admin check error:", err);
     res.status(500).json({ error: "Server error" });
@@ -495,9 +504,10 @@ app.post("/api/auth/signup", async (req, res) => {
         .json({ error: `Validation error: ${err.message}` });
     }
     if (err.code === 11000) {
-      return res
-        .status(400)
-        .json({ error: "Duplicate key error: email, mobile, or roll number already exists" });
+      return res.status(400).json({
+        error:
+          "Duplicate key error: email, mobile, or roll number already exists",
+      });
     }
     res.status(500).json({ error: "Signup failed: Internal server error" });
   }
@@ -580,7 +590,8 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
 
 // User Details Endpoint (POST)
 app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
-  const { semester, course, specialization, isClubMember, clubName, rollNo } = req.body;
+  const { semester, course, specialization, isClubMember, clubName, rollNo } =
+    req.body;
   if (!semester || !course || !specialization) {
     return res
       .status(400)
@@ -849,11 +860,11 @@ app.post(
   }
 );
 
-// Update Club (Head Coordinator or Admin)
+// Modified Update Club (Super Admin only)
 app.patch(
   "/api/clubs/:id",
   authenticateToken,
-  isHeadCoordinatorOrAdmin,
+  isSuperAdmin, // Changed to isSuperAdmin
   upload.fields([
     { name: "icon", maxCount: 1 },
     { name: "banner", maxCount: 1 },
@@ -1343,7 +1354,7 @@ app.delete(
   }
 );
 
-// Create Event
+// Create Event (Super Admin only)
 app.post(
   "/api/events",
   authenticateToken,
@@ -1438,7 +1449,7 @@ app.get("/api/events/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Update Event
+// Update Event (Super Admin only)
 app.put(
   "/api/events/:id",
   authenticateToken,
@@ -1502,7 +1513,7 @@ app.put(
   }
 );
 
-// Delete Event
+// Delete Event (Super Admin only)
 app.delete(
   "/api/events/:id",
   authenticateToken,
@@ -1897,84 +1908,95 @@ app.get("/api/clubs/:clubId/contacts", authenticateToken, async (req, res) => {
 });
 
 // Create Attendance Record
-app.post("/api/attendance", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
-  const { club, date, lectureNumber, attendance, stats } = req.body;
-  if (!club || !date || !lectureNumber || !attendance || !stats) {
-    return res.status(400).json({ error: "All fields are required" });
-  }
-
-  try {
-    const clubDoc = await Club.findById(club);
-    if (!clubDoc) {
-      return res.status(404).json({ error: "Club not found" });
+app.post(
+  "/api/attendance",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    const { club, date, lectureNumber, attendance, stats } = req.body;
+    if (!club || !date || !lectureNumber || !attendance || !stats) {
+      return res.status(400).json({ error: "All fields are required" });
     }
 
-    const attendanceRecord = new Attendance({
-      club,
-      date,
-      lectureNumber,
-      attendance: Object.entries(attendance).map(([userId, status]) => ({
-        userId,
-        status,
-      })),
-      stats,
-      createdBy: req.user.id,
-    });
-    await attendanceRecord.save();
-
-    const members = await User.find({ clubName: clubDoc.name });
-    for (const member of members) {
-      const status = attendanceRecord.attendance.find(
-        (entry) => entry.userId.toString() === member._id.toString()
-      )?.status;
-      if (status) {
-        await Notification.create({
-          userId: member._id,
-          message: `Your attendance for ${clubDoc.name} (Lecture ${lectureNumber}, ${date}) was marked as ${status}.`,
-          type: "attendance",
-        });
+    try {
+      const clubDoc = await Club.findById(club);
+      if (!clubDoc) {
+        return res.status(404).json({ error: "Club not found" });
       }
-    }
 
-    res.status(201).json({ message: "Attendance recorded successfully", attendance: attendanceRecord });
-  } catch (err) {
-    console.error("Attendance creation error:", err);
-    res.status(500).json({ error: "Server error" });
+      const attendanceRecord = new Attendance({
+        club,
+        date,
+        lectureNumber,
+        attendance: Object.entries(attendance).map(([userId, status]) => ({
+          userId,
+          status,
+        })),
+        stats,
+        createdBy: req.user.id,
+      });
+      await attendanceRecord.save();
+
+      const members = await User.find({ clubName: clubDoc.name });
+      for (const member of members) {
+        const status = attendanceRecord.attendance.find(
+          (entry) => entry.userId.toString() === member._id.toString()
+        )?.status;
+        if (status) {
+          await Notification.create({
+            userId: member._id,
+            message: `Your attendance for ${clubDoc.name} (Lecture ${lectureNumber}, ${date}) was marked as ${status}.`,
+            type: "attendance",
+          });
+        }
+      }
+
+      res.status(201).json({
+        message: "Attendance recorded successfully",
+        attendance: attendanceRecord,
+      });
+    } catch (err) {
+      console.error("Attendance creation error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
   }
-});
+);
 
 // Get Attendance Records
-app.get("/api/attendance", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
-  try {
-    const { club, date, lectureNumber } = req.query;
-    const query = {};
-    if (club) query.club = club;
-    if (date) query.date = date;
-    if (lectureNumber) query.lectureNumber = Number(lectureNumber);
+app.get(
+  "/api/attendance",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    try {
+      const { club, date, lectureNumber } = req.query;
+      const query = {};
+      if (club) query.club = club;
+      if (date) query.date = date;
+      if (lectureNumber) query.lectureNumber = Number(lectureNumber);
 
-    const user = await User.findById(req.user.id);
-    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-      : [];
-    if (!user.isAdmin && !superAdminEmails.includes(user.email)) {
-      const clubs = await Club.find({
-        superAdmins: user._id,
-      }).distinct("_id");
-      query.club = { $in: clubs };
+      const user = await User.findById(req.user.id);
+      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+        : [];
+      if (!user.isAdmin && !superAdminEmails.includes(user.email)) {
+        const clubs = await Club.find({
+          superAdmins: user._id,
+        }).distinct("_id");
+        query.club = { $in: clubs };
+      }
+
+      const attendanceRecords = await Attendance.find(query)
+        .populate("club", "name")
+        .populate("createdBy", "name email")
+        .populate("attendance.userId", "name email rollNo");
+      res.json(attendanceRecords);
+    } catch (err) {
+      console.error("Error fetching attendance records:", err);
+      res.status(500).json({ error: "Server error" });
     }
-
-    const attendanceRecords = await Attendance.find(query)
-      .populate("club", "name")
-      .populate("createdBy", "name email")
-      .populate("attendance.userId", "name email rollNo");
-    res.json(attendanceRecords);
-  } catch (err) {
-    console.error("Error fetching attendance records:", err);
-    res.status(500).json({ error: "Server error" });
   }
-});
-
-
+);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
