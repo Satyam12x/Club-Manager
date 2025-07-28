@@ -19,12 +19,6 @@ app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
-// Ensure uploads directory exists
-// const uploadsDir = path.join(__dirname, "Uploads");
-// if (!fs.existsSync(uploadsDir)) {
-//   fs.mkdirSync(UploadsDir);
-// }
-
 // Multer configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -65,7 +59,7 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   mobile: { type: String, unique: true, sparse: true },
   rollNo: { type: String, unique: true, sparse: true },
-  branch: { type: String, default: null }, // Added branch field
+  branch: { type: String, default: null },
   semester: { type: Number, default: null },
   course: { type: String, default: null },
   specialization: { type: String, default: null },
@@ -1359,7 +1353,7 @@ app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
     }
     const members = await User.find(
       { clubName: club.name },
-      "name email mobile phone rollNo branch"
+      "name email mobile phone rollNo branch semester course specialization"
     ).lean();
     res.json(members);
   } catch (err) {
@@ -1977,11 +1971,11 @@ app.post(
   isSuperAdminOrAdmin,
   async (req, res) => {
     const { clubId } = req.params;
-    const { name, email, rollNo, branch } = req.body;
-    if (!name || !email || !rollNo || !branch) {
+    const { name, email, rollNo, branch, semester, course, specialization } = req.body;
+    if (!name || !email || !rollNo || !branch || !semester || !course || !specialization) {
       return res
         .status(400)
-        .json({ error: "Name, email, roll number, and branch are required" });
+        .json({ error: "All fields are required" });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: "Invalid email address" });
@@ -2003,15 +1997,21 @@ app.post(
         user.clubName.push(club.name);
         user.isClubMember = true;
         user.branch = branch;
+        user.semester = semester;
+        user.course = course;
+        user.specialization = specialization;
         await user.save();
       } else {
-        const defaultPassword = "default123"; // Default password for new users
+        const defaultPassword = "default123";
         user = new User({
           name,
           email,
           password: defaultPassword,
           rollNo,
           branch,
+          semester,
+          course,
+          specialization,
           clubName: [club.name],
           isClubMember: true,
         });
@@ -2042,6 +2042,9 @@ app.post(
           email: user.email,
           rollNo: user.rollNo,
           branch: user.branch,
+          semester: user.semester,
+          course: user.course,
+          specialization: user.specialization,
         },
       });
     } catch (err) {
@@ -2152,11 +2155,11 @@ app.post(
                     new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
                   ],
                 }),
-                ...presentStudents.map((student, index) => new TableRow({
+                ...presentStudents.map(student => new TableRow({
                   children: [
-                    new TableCell({ children: [new Paragraph(student.name || "Unknown")] }),
-                    new TableCell({ children: [new Paragraph(String(index + 1))] }), // Placeholder roll numbers
-                    new TableCell({ children: [new Paragraph(student.branch || "N/A")] }),
+                    new TableCell({ children: [new Paragraph(student.name)] }),
+                    new TableCell({ children: [new Paragraph(student.rollNo)] }),
+                    new TableCell({ children: [new Paragraph(student.branch)] }),
                   ],
                 })),
               ],
@@ -2166,76 +2169,98 @@ app.post(
         }],
       });
 
-      const docxFileName = `Attendance_${clubDoc.name}_${eventDoc.title}_${Date.now()}.docx`;
       const buffer = await Packer.toBuffer(doc);
+      const docFileName = `Attendance_${eventDoc.title}_${Date.now()}.docx`;
+      const docFilePath = path.join(__dirname, "Uploads", docFileName);
+      fs.writeFileSync(docFilePath, buffer);
 
-      // Send email with DOCX attachment directly from buffer
-      const mailOptions = {
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: process.env.HEAD_EMAIL,
-        subject: `Attendance Report: ${eventDoc.title} - ${clubDoc.name}`,
-        text: `Please find attached the attendance report for ${eventDoc.title} held by ${clubDoc.name} on ${new Date(date).toLocaleDateString()}.`,
-        attachments: [
-          {
-            filename: docxFileName,
-            content: buffer,
-            contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-          },
-        ],
-      };
-
-      await transporter.sendMail(mailOptions);
-      console.log(`Attendance report sent to ${process.env.HEAD_EMAIL}`);
-
-      // Notify members about their attendance
-      for (const record of attendanceRecords) {
+      // Notify present students
+      for (const student of presentStudents) {
         await Notification.create({
-          userId: record.userId,
-          message: `Your attendance for ${eventDoc.title} (${clubDoc.name}) on ${new Date(date).toLocaleDateString()} has been marked as ${record.status}.`,
+          userId: student._id,
+          message: `Your attendance has been marked as present for "${eventDoc.title}" on ${new Date(date).toLocaleDateString()}.`,
           type: "attendance",
         });
       }
 
       res.status(201).json({
-        message: "Attendance recorded successfully and report sent",
-        attendance: attendanceRecord,
+        message: "Attendance recorded successfully",
+        attendance: {
+          ...attendanceRecord._doc,
+          docLink: `http://localhost:5000/uploads/${docFileName}`,
+        },
       });
     } catch (err) {
-      console.error("Attendance creation error:", {
-        message: err.message,
-        stack: err.stack,
-        clubId: club,
-        eventId: event,
-        userId: req.user.id,
+      console.error("Error creating attendance:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
+// Get Present Students for an Event
+app.get(
+  "/api/attendance/:eventId/present",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    try {
+      const { eventId } = req.params;
+      const attendanceRecord = await Attendance.findOne({ event: eventId })
+        .populate({
+          path: "attendance.userId",
+          select: "name email rollNo branch",
+        })
+        .lean();
+
+      if (!attendanceRecord) {
+        return res.status(404).json({ error: "Attendance record not found for this event" });
+      }
+
+      const presentStudents = attendanceRecord.attendance
+        .filter(record => record.status === "present")
+        .map(record => ({
+          _id: record.userId._id,
+          name: record.userId.name,
+          email: record.userId.email,
+          rollNo: record.userId.rollNo,
+          branch: record.userId.branch,
+        }));
+
+      res.json({
+        eventId,
+        presentStudents,
+        totalPresent: presentStudents.length,
       });
+    } catch (err) {
+      console.error("Error fetching present students:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
 );
 
 // Get Attendance Records
-app.get("/api/attendance", authenticateToken, async (req, res) => {
-  try {
-    const { club, event } = req.query;
-    const query = {};
-    if (club) query.club = club;
-    if (event) query.event = event;
+app.get(
+  "/api/attendance",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    try {
+      const { club, event } = req.query;
+      const query = {};
+      if (club) query.club = club;
+      if (event) query.event = event;
 
-    const user = await User.findById(req.user.id);
-    if (!user.isAdmin && !user.isHeadCoordinator) {
-      query.club = { $in: await Club.find({ name: { $in: user.clubName } }).distinct("_id") };
+      const attendanceRecords = await Attendance.find(query)
+        .populate("club", "name")
+        .populate("event", "title")
+        .populate("createdBy", "name email");
+      res.json(attendanceRecords);
+    } catch (err) {
+      console.error("Error fetching attendance records:", err);
+      res.status(500).json({ error: "Server error" });
     }
-
-    const attendanceRecords = await Attendance.find(query)
-      .populate("club", "name")
-      .populate("event", "title")
-      .populate("attendance.userId", "name email rollNo branch");
-    res.json(attendanceRecords);
-  } catch (err) {
-    console.error("Error fetching attendance records:", err);
-    res.status(500).json({ error: "Server error" });
   }
-});
+);
 
 // Update Attendance Record
 app.put(
@@ -2267,7 +2292,6 @@ app.put(
 
       const clubMembers = await User.find({ clubName: clubDoc.name }).distinct("_id");
       const clubMemberIds = clubMembers.map(id => id.toString());
-
       const updatedAttendance = Object.entries(attendance)
         .filter(([userId, status]) => status && clubMemberIds.includes(userId))
         .map(([userId, status]) => ({
@@ -2285,7 +2309,12 @@ app.put(
       const attendanceRate = clubMembers.length > 0 ? ((presentCount / clubMembers.length) * 100).toFixed(1) : 0;
 
       attendanceRecord.attendance = updatedAttendance;
-      attendanceRecord.stats = { presentCount, absentCount, totalMarked, attendanceRate };
+      attendanceRecord.stats = {
+        presentCount,
+        absentCount,
+        totalMarked,
+        attendanceRate,
+      };
       await attendanceRecord.save();
 
       // Generate updated DOCX file
@@ -2298,7 +2327,7 @@ app.put(
           properties: {},
           children: [
             new Paragraph({
-              text: `Updated Attendance Report for ${eventDoc.title}`,
+              text: `Attendance Report for ${eventDoc.title}`,
               heading: HeadingLevel.HEADING_1,
               alignment: "center",
             }),
@@ -2323,11 +2352,11 @@ app.put(
                     new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
                   ],
                 }),
-                ...presentStudents.map((student, index) => new TableRow({
+                ...presentStudents.map(student => new TableRow({
                   children: [
-                    new TableCell({ children: [new Paragraph(student.name || "Unknown")] }),
-                    new TableCell({ children: [new Paragraph(String(index + 1))] }), // Placeholder roll numbers
-                    new TableCell({ children: [new Paragraph(student.branch || "N/A")] }),
+                    new TableCell({ children: [new Paragraph(student.name)] }),
+                    new TableCell({ children: [new Paragraph(student.rollNo)] }),
+                    new TableCell({ children: [new Paragraph(student.branch)] }),
                   ],
                 })),
               ],
@@ -2337,51 +2366,29 @@ app.put(
         }],
       });
 
-      const docxFileName = `Updated_Attendance_${clubDoc.name}_${eventDoc.title}_${Date.now()}.docx`;
-      const docxPath = path.join(__dirname, "Uploads", docxFileName);
       const buffer = await Packer.toBuffer(doc);
-      fs.writeFileSync(docxPath, buffer);
+      const docFileName = `Attendance_${eventDoc.title}_${Date.now()}.docx`;
+      const docFilePath = path.join(__dirname, "Uploads", docFileName);
+      fs.writeFileSync(docFilePath, buffer);
 
-      // Send updated email with DOCX attachment
-      const mailOptions = {
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: process.env.HEAD_EMAIL,
-        subject: `Updated Attendance Report: ${eventDoc.title} - ${clubDoc.name}`,
-        text: `Please find attached the updated attendance report for ${eventDoc.title} held by ${clubDoc.name} on ${new Date(attendanceRecord.date).toLocaleDateString()}.`,
-        attachments: [
-          {
-            filename: docxFileName,
-            path: docxPath,
-          },
-        ],
-      };
-
-      await transporter.sendMail(mailOptions);
-      console.log(`Updated attendance report sent to ${process.env.HEAD_EMAIL}`);
-
-      // Clean up the file after sending
-      fs.unlinkSync(docxPath);
-
-      // Notify members about their updated attendance
-      for (const record of updatedAttendance) {
+      // Notify updated present students
+      for (const student of presentStudents) {
         await Notification.create({
-          userId: record.userId,
-          message: `Your attendance for ${eventDoc.title} (${clubDoc.name}) on ${new Date(attendanceRecord.date).toLocaleDateString()} has been updated to ${record.status}.`,
+          userId: student._id,
+          message: `Your attendance has been updated as present for "${eventDoc.title}" on ${new Date(attendanceRecord.date).toLocaleDateString()}.`,
           type: "attendance",
         });
       }
 
       res.json({
-        message: "Attendance updated successfully and report sent",
-        attendance: attendanceRecord,
+        message: "Attendance updated successfully",
+        attendance: {
+          ...attendanceRecord._doc,
+          docLink: `http://localhost:5000/uploads/${docFileName}`,
+        },
       });
     } catch (err) {
-      console.error("Attendance update error:", {
-        message: err.message,
-        stack: err.stack,
-        attendanceId: id,
-        userId: req.user.id,
-      });
+      console.error("Error updating attendance:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
@@ -2399,23 +2406,10 @@ app.delete(
         return res.status(404).json({ error: "Attendance record not found" });
       }
 
-      const clubDoc = await Club.findById(attendanceRecord.club);
-      const eventDoc = await Event.findById(attendanceRecord.event);
-
       await attendanceRecord.deleteOne();
-
-      // Notify members about deletion
-      for (const record of attendanceRecord.attendance) {
-        await Notification.create({
-          userId: record.userId,
-          message: `Attendance record for ${eventDoc?.title || "event"} (${clubDoc?.name || "club"}) on ${new Date(attendanceRecord.date).toLocaleDateString()} has been deleted.`,
-          type: "attendance",
-        });
-      }
-
       res.json({ message: "Attendance record deleted successfully" });
     } catch (err) {
-      console.error("Attendance deletion error:", err);
+      console.error("Error deleting attendance:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
