@@ -761,27 +761,30 @@ app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
 // Get Clubs
 app.get("/api/clubs", authenticateToken, async (req, res) => {
   try {
-    const { name, category } = req.query;
-    const query = {};
-    if (name) query.name = new RegExp(`^${name}$`, "i");
-    if (category) query.category = category;
-    const clubs = await Club.find(query).populate("superAdmins", "name email");
-    const transformedClubs = await Promise.all(
+    const clubs = await Club.find()
+      .populate("superAdmins", "name email")
+      .lean();
+
+    // Dynamically calculate memberCount and eventsCount for each club
+    const clubsWithCounts = await Promise.all(
       clubs.map(async (club) => {
-        const members = await User.find({
-          clubName: club.name,
-        }).countDocuments();
+        const memberCount = await User.countDocuments({ clubName: club.name });
+        const eventsCount = await Event.countDocuments({ club: club._id });
         return {
-          ...club._doc,
-          icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
-          banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
-          memberCount: members,
+          ...club,
+          memberCount,
+          eventsCount,
         };
       })
     );
-    res.json(transformedClubs);
+
+    res.json(clubsWithCounts);
   } catch (err) {
-    console.error("Error fetching clubs:", err);
+    console.error("Error fetching clubs:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user.id,
+    });
     res.status(500).json({ error: "Server error" });
   }
 });
