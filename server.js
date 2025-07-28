@@ -20,9 +20,7 @@ app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, "Uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(UploadsDir);
-}
+
 
 // Multer configuration (unchanged)
 const storage = multer.diskStorage({
