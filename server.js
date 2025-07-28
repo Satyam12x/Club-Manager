@@ -14,7 +14,7 @@ dotenv.config();
 
 const app = express();
 
-// Middleware
+// Middlewares
 app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
