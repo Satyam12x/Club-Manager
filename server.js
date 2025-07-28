@@ -20,9 +20,6 @@ app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, "Uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(UploadsDir);
-}
 
 // Multer configuration
 const storage = multer.diskStorage({
@@ -134,9 +131,38 @@ const eventSchema = new mongoose.Schema({
     required: true,
   },
   createdAt: { type: Date, default: Date.now },
+  registeredUsers: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: [],
+    },
+  ],
 });
 
 const Event = mongoose.model("Event", eventSchema);
+
+// New EventRegistration Schema
+const eventRegistrationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  eventId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Event",
+    required: true,
+  },
+  clubName: { type: String, required: true },
+  status: {
+    type: String,
+    enum: ["pending", "confirmed", "cancelled"],
+    default: "pending",
+  },
+  registeredAt: { type: Date, default: Date.now },
+});
+
+const EventRegistration = mongoose.model(
+  "EventRegistration",
+  eventRegistrationSchema
+);
 
 // Activity Schema
 const activitySchema = new mongoose.Schema({
@@ -523,6 +549,126 @@ app.post("/api/auth/login-password", async (req, res) => {
     }
   );
   res.json({ token });
+});
+
+app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const event = await Event.findById(id).populate("club", "name");
+    if (!event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const club = event.club;
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    // Check if user is already registered
+    const existingRegistration = await EventRegistration.findOne({
+      userId: user._id,
+      eventId: event._id,
+    });
+    if (existingRegistration) {
+      return res
+        .status(400)
+        .json({ error: "You are already registered for this event" });
+    }
+
+    // Create event registration
+    const registration = new EventRegistration({
+      userId: user._id,
+      eventId: event._id,
+      clubName: club.name,
+      status: "confirmed", // Auto-confirm event registration
+    });
+    await registration.save();
+
+    // Add user to event's registeredUsers
+    event.registeredUsers.push(user._id);
+    await event.save();
+
+    // Check if user is already a member or has a pending request
+    if (user.clubName.includes(club.name)) {
+      // User is already a member, no need for membership request
+      await Notification.create({
+        userId: user._id,
+        message: `You have successfully registered for the event "${event.title}" by ${club.name}.`,
+        type: "event",
+      });
+
+      return res.json({
+        message: "Successfully registered for the event",
+        registration,
+      });
+    }
+
+    if (user.pendingClubs.includes(club.name)) {
+      // User has a pending membership request
+      await Notification.create({
+        userId: user._id,
+        message: `You have successfully registered for the event "${event.title}" by ${club.name}. Your membership request for ${club.name} is still pending.`,
+        type: "event",
+      });
+
+      return res.json({
+        message:
+          "Successfully registered for the event; membership request is pending",
+        registration,
+      });
+    }
+
+    // Create membership request for the club
+    const membershipRequest = new MembershipRequest({
+      userId: user._id,
+      clubName: club.name,
+    });
+    await membershipRequest.save();
+
+    user.pendingClubs.push(club.name);
+    await user.save();
+
+    // Notify head coordinators and super admins
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    const clubDoc = await Club.findById(club._id);
+    const recipients = [...clubDoc.headCoordinators, ...superAdminEmails];
+    if (recipients.length > 0) {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: recipients,
+        subject: `New Membership Request for ${club.name} via Event Registration`,
+        text: `User ${user.name} (${user.email}) has requested to join ${club.name} by registering for the event "${event.title}". Please review the request in the admin dashboard.`,
+      });
+    }
+
+    // Notify user
+    await Notification.create({
+      userId: user._id,
+      message: `You have successfully registered for the event "${event.title}" by ${club.name}. A membership request for ${club.name} has been submitted and is pending approval.`,
+      type: "event",
+    });
+
+    res.json({
+      message:
+        "Successfully registered for the event and submitted membership request",
+      registration,
+    });
+  } catch (err) {
+    console.error("Event registration error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      eventId: req.params.id,
+    });
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 app.post("/api/auth/signup", async (req, res) => {
