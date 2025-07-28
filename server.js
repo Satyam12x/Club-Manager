@@ -8,6 +8,7 @@ const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType } = require("docx");
 
 dotenv.config();
 
@@ -18,13 +19,13 @@ app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
-// // Ensure uploads directory exists
+// Ensure uploads directory exists
 // const uploadsDir = path.join(__dirname, "Uploads");
 // if (!fs.existsSync(uploadsDir)) {
 //   fs.mkdirSync(UploadsDir);
 // }
 
-// Multer configuration (unchanged)
+// Multer configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, "Uploads/");
@@ -51,19 +52,20 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
 
-// MongoDB Connection (unchanged)
+// MongoDB Connection
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// Schemas (only showing updated Attendance schema)
+// Schemas
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   mobile: { type: String, unique: true, sparse: true },
   rollNo: { type: String, unique: true, sparse: true },
+  branch: { type: String, default: null }, // Added branch field
   semester: { type: Number, default: null },
   course: { type: String, default: null },
   specialization: { type: String, default: null },
@@ -182,7 +184,6 @@ const MembershipRequest = mongoose.model(
   membershipRequestSchema
 );
 
-// Updated Attendance Schema
 const attendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   event: { type: mongoose.Schema.Types.ObjectId, ref: "Event", required: true },
@@ -213,7 +214,7 @@ const attendanceSchema = new mongoose.Schema({
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
 
-// Nodemailer Transporter (unchanged)
+// Nodemailer Transporter
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
   port: parseInt(process.env.EMAIL_PORT, 10),
@@ -236,14 +237,14 @@ transporter.verify((error, success) => {
   }
 });
 
-// Generate OTP (unchanged)
+// Generate OTP
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
-// Store OTPs temporarily (unchanged)
+// Store OTPs temporarily
 const otpStore = {};
 
-// Authentication Middleware (unchanged)
+// Authentication Middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
@@ -288,7 +289,7 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
       return next();
     }
 
-    const clubId = req.body.club || req.query.club || req.body.event?.club;
+    const clubId = req.body.club || req.query.club || req.body.event?.club || req.params.clubId;
     if (!clubId) {
       console.error("isSuperAdminOrAdmin: Club ID not provided in request");
       return res.status(400).json({ error: "Club ID is required" });
@@ -433,7 +434,7 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
   }
 };
 
-// Authentication Routes (unchanged)
+// Authentication Routes
 app.post("/api/auth/send-otp", async (req, res) => {
   const { email } = req.body;
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -512,7 +513,7 @@ app.post("/api/auth/login-password", async (req, res) => {
 });
 
 app.post("/api/auth/signup", async (req, res) => {
-  const { name, email, password, mobile, rollNo } = req.body;
+  const { name, email, password, mobile, rollNo, branch } = req.body;
   if (!name || !email || !password) {
     return res
       .status(400)
@@ -544,6 +545,7 @@ app.post("/api/auth/signup", async (req, res) => {
       password,
       mobile,
       rollNo,
+      branch,
       isAdmin,
       isHeadCoordinator,
       headCoordinatorClubs,
@@ -598,7 +600,7 @@ app.post("/api/auth/verify-otp-login", async (req, res) => {
   res.json({ token });
 });
 
-// User Profile Update (unchanged)
+// User Profile Update
 app.put("/api/auth/user", authenticateToken, async (req, res) => {
   const { name, email, phone } = req.body;
   if (!name || !email) {
@@ -649,7 +651,7 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
   }
 });
 
-// User Details Endpoint (POST) (unchanged)
+// User Details Endpoint (POST)
 app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
   const { semester, course, specialization, isClubMember, clubName, rollNo } =
     req.body;
@@ -685,7 +687,7 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
   }
 });
 
-// User Details Endpoint (PATCH for joining clubs) (unchanged)
+// User Details Endpoint (PATCH for joining clubs)
 app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
   const { clubName, isClubMember } = req.body;
   if (!clubName || !Array.isArray(clubName)) {
@@ -729,11 +731,11 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
   }
 });
 
-// Get User Data (unchanged)
+// Get User Data
 app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo"
+      "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo branch"
     );
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json(user);
@@ -743,11 +745,11 @@ app.get("/api/auth/user", authenticateToken, async (req, res) => {
   }
 });
 
-// Get All Users (Admin only) (unchanged)
+// Get All Users (Admin only)
 app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
   try {
     const users = await User.find().select(
-      "name email mobile semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs createdAt rollNo"
+      "name email mobile semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs createdAt rollNo branch"
     );
     res.json(users);
   } catch (err) {
@@ -756,7 +758,7 @@ app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
   }
 });
 
-// Get Clubs (unchanged)
+// Get Clubs
 app.get("/api/clubs", authenticateToken, async (req, res) => {
   try {
     const { name, category } = req.query;
@@ -784,7 +786,7 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
   }
 });
 
-// Create Club (Admin only) (unchanged)
+// Create Club (Admin only)
 app.post(
   "/api/clubs",
   authenticateToken,
@@ -918,7 +920,7 @@ app.post(
   }
 );
 
-// Update Club (Super Admin only) (unchanged)
+// Update Club (Super Admin only)
 app.patch(
   "/api/clubs/:id",
   authenticateToken,
@@ -960,9 +962,9 @@ app.patch(
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-              .split(",")
-              .map((email) => email.trim())
-              .filter((email) => email)
+            .split(",")
+            .map((email) => email.trim())
+            .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
@@ -995,9 +997,9 @@ app.patch(
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
           ? superAdmins
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id)
+            .split(",")
+            .map((id) => id.trim())
+            .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
@@ -1079,7 +1081,7 @@ app.patch(
   }
 );
 
-// Delete Club (Admin only) (unchanged)
+// Delete Club (Admin only)
 app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
   try {
     const club = await Club.findById(req.params.id);
@@ -1135,7 +1137,7 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
   }
 });
 
-// Join Club (unchanged)
+// Join Club
 app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
@@ -1196,7 +1198,7 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
   }
 });
 
-// Get Membership Requests (unchanged)
+// Get Membership Requests
 app.get("/api/membership-requests", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
@@ -1226,7 +1228,7 @@ app.get("/api/membership-requests", authenticateToken, async (req, res) => {
   }
 });
 
-// Approve/Reject Membership Request (unchanged)
+// Approve/Reject Membership Request
 app.patch(
   "/api/membership-requests/:id",
   authenticateToken,
@@ -1321,7 +1323,7 @@ app.patch(
   }
 );
 
-// Get Single Club (unchanged)
+// Get Single Club
 app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
   try {
     const club = await Club.findById(req.params.id).populate(
@@ -1345,7 +1347,7 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Get Club Members (unchanged)
+// Get Club Members
 app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
   try {
     const club = await Club.findById(req.params.id);
@@ -1354,7 +1356,7 @@ app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
     }
     const members = await User.find(
       { clubName: club.name },
-      "name email mobile phone rollNo"
+      "name email mobile phone rollNo branch"
     ).lean();
     res.json(members);
   } catch (err) {
@@ -1363,7 +1365,7 @@ app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
   }
 });
 
-// Remove Club Member (unchanged)
+// Remove Club Member
 app.delete(
   "/api/clubs/:id/members",
   authenticateToken,
@@ -1412,7 +1414,7 @@ app.delete(
   }
 );
 
-// Create Event (Super Admin only) (unchanged)
+// Create Event (Super Admin only)
 app.post(
   "/api/events",
   authenticateToken,
@@ -1468,7 +1470,7 @@ app.post(
   }
 );
 
-// Get Events (unchanged)
+// Get Events
 app.get("/api/events", authenticateToken, async (req, res) => {
   try {
     const { club } = req.query;
@@ -1487,7 +1489,7 @@ app.get("/api/events", authenticateToken, async (req, res) => {
   }
 });
 
-// Get Single Event (unchanged)
+// Get Single Event
 app.get("/api/events/:id", authenticateToken, async (req, res) => {
   try {
     const event = await Event.findById(req.params.id)
@@ -1507,7 +1509,7 @@ app.get("/api/events/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Update Event (Super Admin only) (unchanged)
+// Update Event (Super Admin only)
 app.put(
   "/api/events/:id",
   authenticateToken,
@@ -1571,7 +1573,7 @@ app.put(
   }
 );
 
-// Delete Event (Super Admin only) (unchanged)
+// Delete Event (Super Admin only)
 app.delete(
   "/api/events/:id",
   authenticateToken,
@@ -1614,7 +1616,7 @@ app.delete(
   }
 );
 
-// Create Activity (unchanged)
+// Create Activity
 app.post(
   "/api/activities",
   authenticateToken,
@@ -1670,7 +1672,7 @@ app.post(
   }
 );
 
-// Get Activities (unchanged)
+// Get Activities
 app.get("/api/activities", authenticateToken, async (req, res) => {
   try {
     const { club } = req.query;
@@ -1690,7 +1692,7 @@ app.get("/api/activities", authenticateToken, async (req, res) => {
   }
 });
 
-// Get Single Activity (unchanged)
+// Get Single Activity
 app.get("/api/activities/:id", authenticateToken, async (req, res) => {
   try {
     const activity = await Activity.findById(req.params.id).populate(
@@ -1711,7 +1713,7 @@ app.get("/api/activities/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Update Activity (unchanged)
+// Update Activity
 app.put(
   "/api/activities/:id",
   authenticateToken,
@@ -1780,7 +1782,7 @@ app.put(
   }
 );
 
-// Delete Activity (unchanged)
+// Delete Activity
 app.delete(
   "/api/activities/:id",
   authenticateToken,
@@ -1827,7 +1829,7 @@ app.delete(
   }
 );
 
-// Get Notifications (unchanged)
+// Get Notifications
 app.get("/api/notifications", authenticateToken, async (req, res) => {
   try {
     const notifications = await Notification.find({ userId: req.user.id })
@@ -1840,7 +1842,7 @@ app.get("/api/notifications", authenticateToken, async (req, res) => {
   }
 });
 
-// Mark Notification as Read (unchanged)
+// Mark Notification as read
 app.patch(
   "/api/notifications/:id/read",
   authenticateToken,
@@ -1863,7 +1865,7 @@ app.patch(
   }
 );
 
-// Club Contact Form (unchanged)
+// Club Contact Form
 app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { message } = req.body;
@@ -1897,7 +1899,7 @@ app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
   }
 });
 
-// Global Contact Form (unchanged)
+// Global Contact Form
 app.post("/api/contact", authenticateToken, async (req, res) => {
   const { name, email, message } = req.body;
   if (!name || !email || !message) {
@@ -1936,7 +1938,7 @@ app.post("/api/contact", authenticateToken, async (req, res) => {
   }
 });
 
-// Get Club Contact Details (unchanged)
+// Get Club Contact Details
 app.get("/api/clubs/:clubId/contacts", authenticateToken, async (req, res) => {
   try {
     const club = await Club.findById(req.params.clubId);
@@ -1965,6 +1967,97 @@ app.get("/api/clubs/:clubId/contacts", authenticateToken, async (req, res) => {
   }
 });
 
+// Add New Student and Join Club
+app.post(
+  "/api/clubs/:clubId/add-student",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    const { clubId } = req.params;
+    const { name, email, rollNo, branch } = req.body;
+    if (!name || !email || !rollNo || !branch) {
+      return res
+        .status(400)
+        .json({ error: "Name, email, roll number, and branch are required" });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+
+    try {
+      const club = await Club.findById(clubId);
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      let user = await User.findOne({ $or: [{ email }, { rollNo }] });
+      if (user) {
+        if (user.clubName.includes(club.name)) {
+          return res
+            .status(400)
+            .json({ error: "User is already a member of this club" });
+        }
+        user.clubName.push(club.name);
+        user.isClubMember = true;
+        user.branch = branch;
+        await user.save();
+      } else {
+        const defaultPassword = "default123"; // Default password for new users
+        user = new User({
+          name,
+          email,
+          password: defaultPassword,
+          rollNo,
+          branch,
+          clubName: [club.name],
+          isClubMember: true,
+        });
+        await user.save();
+
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: `Welcome to ${club.name}`,
+          text: `You have been added to ${club.name}. Your account has been created with email: ${email} and default password: ${defaultPassword}. Please log in and change your password.`,
+        });
+      }
+
+      club.memberCount = await User.countDocuments({ clubName: club.name });
+      await club.save();
+
+      await Notification.create({
+        userId: user._id,
+        message: `You have been added to ${club.name}.`,
+        type: "membership",
+      });
+
+      res.status(201).json({
+        message: "Student added successfully",
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          rollNo: user.rollNo,
+          branch: user.branch,
+        },
+      });
+    } catch (err) {
+      console.error("Error adding student:", {
+        message: err.message,
+        stack: err.stack,
+        clubId,
+        userId: req.user.id,
+      });
+      if (err.code === 11000) {
+        return res
+          .status(400)
+          .json({ error: "Email or roll number already exists" });
+      }
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
 // Create Attendance Record
 app.post(
   "/api/attendance",
@@ -1973,9 +2066,7 @@ app.post(
   async (req, res) => {
     const { club, event, date, attendance } = req.body;
     if (!club || !event || !date || !attendance) {
-      return res
-        .status(400)
-        .json({ error: "Club, event, date, and attendance are required" });
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
     try {
@@ -1989,18 +2080,8 @@ app.post(
         return res.status(404).json({ error: "Event not found" });
       }
 
-      if (eventDoc.club.toString() !== clubDoc._id.toString()) {
-        return res
-          .status(400)
-          .json({ error: "Event does not belong to the specified club" });
-      }
-
-      const clubMembers = await User.find(
-        { clubName: clubDoc.name },
-        "_id"
-      ).lean();
-      const clubMemberIds = clubMembers.map((member) => member._id.toString());
-
+      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct("_id");
+      const clubMemberIds = clubMembers.map(id => id.toString());
       const attendanceRecords = Object.entries(attendance)
         .filter(([userId, status]) => status && clubMemberIds.includes(userId))
         .map(([userId, status]) => ({
@@ -2009,33 +2090,13 @@ app.post(
         }));
 
       if (attendanceRecords.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "No valid attendance records provided" });
+        return res.status(400).json({ error: "No valid attendance records provided" });
       }
 
-      const presentCount = attendanceRecords.filter(
-        (record) => record.status === "present"
-      ).length;
-      const absentCount = attendanceRecords.filter(
-        (record) => record.status === "absent"
-      ).length;
+      const presentCount = attendanceRecords.filter(record => record.status === "present").length;
+      const absentCount = attendanceRecords.filter(record => record.status === "absent").length;
       const totalMarked = presentCount + absentCount;
-      const attendanceRate =
-        clubMembers.length > 0
-          ? ((presentCount / clubMembers.length) * 100).toFixed(1)
-          : 0;
-
-      const existingRecord = await Attendance.findOne({
-        club,
-        event,
-        date: new Date(date).setUTCHours(0, 0, 0, 0),
-      });
-      if (existingRecord) {
-        return res
-          .status(400)
-          .json({ error: "Attendance already recorded for this event and date" });
-      }
+      const attendanceRate = clubMembers.length > 0 ? ((presentCount / clubMembers.length) * 100).toFixed(1) : 0;
 
       const attendanceRecord = new Attendance({
         club,
@@ -2050,27 +2111,91 @@ app.post(
         },
         createdBy: req.user.id,
       });
+
       await attendanceRecord.save();
 
+      // Generate DOCX file
+      const presentStudents = await User.find({
+        _id: { $in: attendanceRecords.filter(r => r.status === "present").map(r => r.userId) },
+      }).select("name rollNo branch").lean();
+
+      const doc = new Document({
+        sections: [{
+          properties: {},
+          children: [
+            new Paragraph({
+              text: `Attendance Report for ${eventDoc.title}`,
+              heading: HeadingLevel.HEADING_1,
+              alignment: "center",
+            }),
+            new Paragraph({
+              text: `Club: ${clubDoc.name}`,
+              heading: HeadingLevel.HEADING_2,
+            }),
+            new Paragraph({
+              text: `Date: ${new Date(date).toLocaleDateString()}`,
+              heading: HeadingLevel.HEADING_2,
+            }),
+            new Paragraph({
+              text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
+              spacing: { after: 200 },
+            }),
+            new Table({
+              rows: [
+                new TableRow({
+                  children: [
+                    new TableCell({ children: [new Paragraph("Name")], width: { size: 30, type: WidthType.PERCENTAGE } }),
+                    new TableCell({ children: [new Paragraph("Roll Number")], width: { size: 20, type: WidthType.PERCENTAGE } }),
+                    new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
+                  ],
+                }),
+                ...presentStudents.map((student, index) => new TableRow({
+                  children: [
+                    new TableCell({ children: [new Paragraph(student.name || "Unknown")] }),
+                    new TableCell({ children: [new Paragraph(String(index + 1))] }), // Placeholder roll numbers
+                    new TableCell({ children: [new Paragraph(student.branch || "N/A")] }),
+                  ],
+                })),
+              ],
+              width: { size: 100, type: WidthType.PERCENTAGE },
+            }),
+          ],
+        }],
+      });
+
+      const docxFileName = `Attendance_${clubDoc.name}_${eventDoc.title}_${Date.now()}.docx`;
+      const buffer = await Packer.toBuffer(doc);
+
+      // Send email with DOCX attachment directly from buffer
+      const mailOptions = {
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: process.env.HEAD_EMAIL,
+        subject: `Attendance Report: ${eventDoc.title} - ${clubDoc.name}`,
+        text: `Please find attached the attendance report for ${eventDoc.title} held by ${clubDoc.name} on ${new Date(date).toLocaleDateString()}.`,
+        attachments: [
+          {
+            filename: docxFileName,
+            content: buffer,
+            contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          },
+        ],
+      };
+
+      await transporter.sendMail(mailOptions);
+      console.log(`Attendance report sent to ${process.env.HEAD_EMAIL}`);
+
+      // Notify members about their attendance
       for (const record of attendanceRecords) {
-        const member = await User.findById(record.userId);
-        if (member) {
-          await Notification.create({
-            userId: member._id,
-            message: `Your attendance for ${clubDoc.name} event "${eventDoc.title}" on ${new Date(
-              date
-            ).toLocaleDateString()} was marked as ${record.status}.`,
-            type: "attendance",
-          });
-        }
+        await Notification.create({
+          userId: record.userId,
+          message: `Your attendance for ${eventDoc.title} (${clubDoc.name}) on ${new Date(date).toLocaleDateString()} has been marked as ${record.status}.`,
+          type: "attendance",
+        });
       }
 
       res.status(201).json({
-        message: "Attendance recorded successfully",
-        attendance: {
-          ...attendanceRecord._doc,
-          date: attendanceRecord.date.toISOString().split("T")[0],
-        },
+        message: "Attendance recorded successfully and report sent",
+        attendance: attendanceRecord,
       });
     } catch (err) {
       console.error("Attendance creation error:", {
@@ -2080,93 +2205,178 @@ app.post(
         eventId: event,
         userId: req.user.id,
       });
-      if (err.name === "ValidationError") {
-        return res
-          .status(400)
-          .json({ error: `Validation error: ${err.message}` });
-      }
       res.status(500).json({ error: "Server error" });
     }
   }
 );
 
 // Get Attendance Records
-app.get("/api/attendance", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
+app.get("/api/attendance", authenticateToken, async (req, res) => {
   try {
     const { club, event } = req.query;
-    if (!club) {
-      return res.status(400).json({ error: "Club ID is required" });
-    }
+    const query = {};
+    if (club) query.club = club;
+    if (event) query.event = event;
 
-    const query = { club };
-    if (event) {
-      query.event = event;
+    const user = await User.findById(req.user.id);
+    if (!user.isAdmin && !user.isHeadCoordinator) {
+      query.club = { $in: await Club.find({ name: { $in: user.clubName } }).distinct("_id") };
     }
 
     const attendanceRecords = await Attendance.find(query)
       .populate("club", "name")
-      .populate("event", "title date")
-      .populate("createdBy", "name email")
-      .populate("attendance.userId", "name email rollNo");
-
-    const transformedRecords = attendanceRecords.map((record) => ({
-      ...record._doc,
-      date: record.date.toISOString().split("T")[0],
-    }));
-
-    res.json(transformedRecords);
+      .populate("event", "title")
+      .populate("attendance.userId", "name email rollNo branch");
+    res.json(attendanceRecords);
   } catch (err) {
-    console.error("Error fetching attendance:", {
-      message: err.message,
-      stack: err.stack,
-      clubId: req.query.club,
-      eventId: req.query.event,
-      userId: req.user.id,
-    });
+    console.error("Error fetching attendance records:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// Get Present Students for an Event
-app.get(
-  "/api/attendance/:eventId/present",
+// Update Attendance Record
+app.put(
+  "/api/attendance/:id",
   authenticateToken,
   isSuperAdminOrAdmin,
   async (req, res) => {
+    const { id } = req.params;
+    const { attendance } = req.body;
+    if (!attendance) {
+      return res.status(400).json({ error: "Attendance data is required" });
+    }
+
     try {
-      const { eventId } = req.params;
-      const event = await Event.findById(eventId);
-      if (!event) {
+      const attendanceRecord = await Attendance.findById(id);
+      if (!attendanceRecord) {
+        return res.status(404).json({ error: "Attendance record not found" });
+      }
+
+      const clubDoc = await Club.findById(attendanceRecord.club);
+      if (!clubDoc) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      const eventDoc = await Event.findById(attendanceRecord.event);
+      if (!eventDoc) {
         return res.status(404).json({ error: "Event not found" });
       }
 
-      const attendanceRecords = await Attendance.find({ event: eventId })
-        .populate("attendance.userId", "name email rollNo")
-        .lean();
+      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct("_id");
+      const clubMemberIds = clubMembers.map(id => id.toString());
 
-      const presentStudents = attendanceRecords
-        .flatMap((record) =>
-          record.attendance
-            .filter((att) => att.status === "present")
-            .map((att) => ({
-              _id: att.userId._id,
-              name: att.userId.name,
-              email: att.userId.email,
-              rollNo: att.userId.rollNo || "N/A",
-              date: record.date.toISOString().split("T")[0],
-            }))
-        )
-        .filter((student) => student._id); // Ensure no null entries
+      const updatedAttendance = Object.entries(attendance)
+        .filter(([userId, status]) => status && clubMemberIds.includes(userId))
+        .map(([userId, status]) => ({
+          userId,
+          status,
+        }));
+
+      if (updatedAttendance.length === 0) {
+        return res.status(400).json({ error: "No valid attendance records provided" });
+      }
+
+      const presentCount = updatedAttendance.filter(record => record.status === "present").length;
+      const absentCount = updatedAttendance.filter(record => record.status === "absent").length;
+      const totalMarked = presentCount + absentCount;
+      const attendanceRate = clubMembers.length > 0 ? ((presentCount / clubMembers.length) * 100).toFixed(1) : 0;
+
+      attendanceRecord.attendance = updatedAttendance;
+      attendanceRecord.stats = { presentCount, absentCount, totalMarked, attendanceRate };
+      await attendanceRecord.save();
+
+      // Generate updated DOCX file
+      const presentStudents = await User.find({
+        _id: { $in: updatedAttendance.filter(r => r.status === "present").map(r => r.userId) },
+      }).select("name rollNo branch").lean();
+
+      const doc = new Document({
+        sections: [{
+          properties: {},
+          children: [
+            new Paragraph({
+              text: `Updated Attendance Report for ${eventDoc.title}`,
+              heading: HeadingLevel.HEADING_1,
+              alignment: "center",
+            }),
+            new Paragraph({
+              text: `Club: ${clubDoc.name}`,
+              heading: HeadingLevel.HEADING_2,
+            }),
+            new Paragraph({
+              text: `Date: ${new Date(attendanceRecord.date).toLocaleDateString()}`,
+              heading: HeadingLevel.HEADING_2,
+            }),
+            new Paragraph({
+              text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
+              spacing: { after: 200 },
+            }),
+            new Table({
+              rows: [
+                new TableRow({
+                  children: [
+                    new TableCell({ children: [new Paragraph("Name")], width: { size: 30, type: WidthType.PERCENTAGE } }),
+                    new TableCell({ children: [new Paragraph("Roll Number")], width: { size: 20, type: WidthType.PERCENTAGE } }),
+                    new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
+                  ],
+                }),
+                ...presentStudents.map((student, index) => new TableRow({
+                  children: [
+                    new TableCell({ children: [new Paragraph(student.name || "Unknown")] }),
+                    new TableCell({ children: [new Paragraph(String(index + 1))] }), // Placeholder roll numbers
+                    new TableCell({ children: [new Paragraph(student.branch || "N/A")] }),
+                  ],
+                })),
+              ],
+              width: { size: 100, type: WidthType.PERCENTAGE },
+            }),
+          ],
+        }],
+      });
+
+      const docxFileName = `Updated_Attendance_${clubDoc.name}_${eventDoc.title}_${Date.now()}.docx`;
+      const docxPath = path.join(__dirname, "Uploads", docxFileName);
+      const buffer = await Packer.toBuffer(doc);
+      fs.writeFileSync(docxPath, buffer);
+
+      // Send updated email with DOCX attachment
+      const mailOptions = {
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: process.env.HEAD_EMAIL,
+        subject: `Updated Attendance Report: ${eventDoc.title} - ${clubDoc.name}`,
+        text: `Please find attached the updated attendance report for ${eventDoc.title} held by ${clubDoc.name} on ${new Date(attendanceRecord.date).toLocaleDateString()}.`,
+        attachments: [
+          {
+            filename: docxFileName,
+            path: docxPath,
+          },
+        ],
+      };
+
+      await transporter.sendMail(mailOptions);
+      console.log(`Updated attendance report sent to ${process.env.HEAD_EMAIL}`);
+
+      // Clean up the file after sending
+      fs.unlinkSync(docxPath);
+
+      // Notify members about their updated attendance
+      for (const record of updatedAttendance) {
+        await Notification.create({
+          userId: record.userId,
+          message: `Your attendance for ${eventDoc.title} (${clubDoc.name}) on ${new Date(attendanceRecord.date).toLocaleDateString()} has been updated to ${record.status}.`,
+          type: "attendance",
+        });
+      }
 
       res.json({
-        event: { _id: event._id, title: event.title },
-        presentStudents,
+        message: "Attendance updated successfully and report sent",
+        attendance: attendanceRecord,
       });
     } catch (err) {
-      console.error("Error fetching present students:", {
+      console.error("Attendance update error:", {
         message: err.message,
         stack: err.stack,
-        eventId: req.params.eventId,
+        attendanceId: id,
         userId: req.user.id,
       });
       res.status(500).json({ error: "Server error" });
@@ -2174,26 +2384,40 @@ app.get(
   }
 );
 
-// Error Handling Middleware
-app.use((err, req, res, next) => {
-  console.error("Global error handler:", {
-    message: err.message,
-    stack: err.stack,
-    path: req.path,
-    method: req.method,
-    userId: req.user?.id,
-  });
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ error: `File upload error: ${err.message}` });
+// Delete Attendance Record
+app.delete(
+  "/api/attendance/:id",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    try {
+      const attendanceRecord = await Attendance.findById(req.params.id);
+      if (!attendanceRecord) {
+        return res.status(404).json({ error: "Attendance record not found" });
+      }
+
+      const clubDoc = await Club.findById(attendanceRecord.club);
+      const eventDoc = await Event.findById(attendanceRecord.event);
+
+      await attendanceRecord.deleteOne();
+
+      // Notify members about deletion
+      for (const record of attendanceRecord.attendance) {
+        await Notification.create({
+          userId: record.userId,
+          message: `Attendance record for ${eventDoc?.title || "event"} (${clubDoc?.name || "club"}) on ${new Date(attendanceRecord.date).toLocaleDateString()} has been deleted.`,
+          type: "attendance",
+        });
+      }
+
+      res.json({ message: "Attendance record deleted successfully" });
+    } catch (err) {
+      console.error("Attendance deletion error:", err);
+      res.status(500).json({ error: "Server error" });
+    }
   }
-  if (err.message.includes("Only JPEG and PNG images are allowed")) {
-    return res.status(400).json({ error: err.message });
-  }
-  res.status(500).json({ error: "Internal server error" });
-});
+);
 
 // Start Server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
