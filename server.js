@@ -34,9 +34,7 @@ const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const filetypes = /jpeg|jpg|png/;
-    const extname = filetypes.test(
-      path.extname(file.originalname).toLowerCase()
-    );
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) {
       return cb(null, true);
@@ -117,7 +115,7 @@ const Club = mongoose.model("Club", clubSchema);
 const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
-  date: { type: String, required: true },
+  date: { type: Date, required: true },
   time: { type: String, required: true },
   location: { type: String, required: true },
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
@@ -134,7 +132,7 @@ const Event = mongoose.model("Event", eventSchema);
 
 const activitySchema = new mongoose.Schema({
   title: { type: String, required: true },
-  date: { type: String, required: true },
+  date: { type: Date, required: true },
   description: { type: String, required: true },
   club: { type: String, required: true },
   images: [{ type: String }],
@@ -173,10 +171,7 @@ const membershipRequestSchema = new mongoose.Schema({
   requestedAt: { type: Date, default: Date.now },
 });
 
-const MembershipRequest = mongoose.model(
-  "MembershipRequest",
-  membershipRequestSchema
-);
+const MembershipRequest = mongoose.model("MembershipRequest", membershipRequestSchema);
 
 const attendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
@@ -192,6 +187,7 @@ const attendanceSchema = new mongoose.Schema({
       status: { type: String, enum: ["present", "absent"], required: true },
     },
   ],
+  presentStudents: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   stats: {
     presentCount: { type: Number, default: 0 },
     absentCount: { type: Number, default: 0 },
@@ -207,6 +203,51 @@ const attendanceSchema = new mongoose.Schema({
 });
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
+
+const lectureSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Lecture = mongoose.model("Lecture", lectureSchema);
+
+const practiceAttendanceSchema = new mongoose.Schema({
+  club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
+  lecture: { type: mongoose.Schema.Types.ObjectId, ref: "Lecture", required: true },
+  date: { type: Date, required: true },
+  roomNo: { type: String, required: true },
+  attendance: [
+    {
+      userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+      },
+      status: { type: String, enum: ["present", "absent"], required: true },
+    },
+  ],
+  presentStudents: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+  stats: {
+    presentCount: { type: Number, default: 0 },
+    absentCount: { type: Number, default: 0 },
+    totalMarked: { type: Number, default: 0 },
+    attendanceRate: { type: Number, default: 0 },
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const PracticeAttendance = mongoose.model("PracticeAttendance", practiceAttendanceSchema);
 
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
@@ -752,6 +793,55 @@ app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
   }
 });
 
+// Validate User IDs
+app.post("/api/users/validate", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
+  const { clubId, userIds } = req.body;
+  if (!clubId || !userIds || !Array.isArray(userIds)) {
+    return res.status(400).json({ error: "clubId and userIds (array) are required" });
+  }
+
+  try {
+    const club = await Club.findById(clubId);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    const validUsers = await User.find({
+      _id: { $in: userIds },
+      clubName: club.name,
+    }).select("_id name email rollNo");
+
+    const validUserIds = validUsers.map((user) => user._id.toString());
+    const invalidUserIds = userIds.filter((id) => !validUserIds.includes(id.toString()));
+
+    if (invalidUserIds.length > 0) {
+      console.warn("Invalid user IDs provided:", {
+        clubId,
+        invalidUserIds,
+        userId: req.user.id,
+      });
+    }
+
+    res.json({
+      validUsers: validUsers.map((user) => ({
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        rollNo: user.rollNo || "N/A",
+      })),
+      invalidUserIds,
+    });
+  } catch (err) {
+    console.error("User validation error:", {
+      message: err.message,
+      stack: err.stack,
+      clubId,
+      userId: req.user.id,
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 // Get Clubs
 app.get("/api/clubs", authenticateToken, async (req, res) => {
   try {
@@ -759,7 +849,6 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
       .populate("superAdmins", "name email")
       .lean();
 
-    // Dynamically calculate memberCount and eventsCount for each club
     const clubsWithCounts = await Promise.all(
       clubs.map(async (club) => {
         const memberCount = await User.countDocuments({ clubName: club.name });
@@ -1100,6 +1189,8 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
     await MembershipRequest.deleteMany({ clubName: club.name });
     await Event.deleteMany({ club: club._id });
     await Attendance.deleteMany({ club: club._id });
+    await PracticeAttendance.deleteMany({ club: club._id });
+    await Lecture.deleteMany({ club: club._id });
 
     if (club.icon && fs.existsSync(club.icon)) fs.unlinkSync(club.icon);
     if (club.banner && fs.existsSync(club.banner)) fs.unlinkSync(club.banner);
@@ -1434,7 +1525,7 @@ app.post(
       const event = new Event({
         title,
         description,
-        date,
+        date: new Date(date),
         time,
         location,
         club,
@@ -1450,7 +1541,7 @@ app.post(
       for (const member of members) {
         await Notification.create({
           userId: member._id,
-          message: `New event "${title}" created for ${clubDoc.name} on ${date}.`,
+          message: `New event "${title}" created for ${clubDoc.name} on ${new Date(date).toLocaleDateString()}.`,
           type: "event",
         });
       }
@@ -1539,7 +1630,7 @@ app.put(
 
       event.title = title;
       event.description = description;
-      event.date = date;
+      event.date = new Date(date);
       event.time = time;
       event.location = location;
       event.club = club;
@@ -1640,7 +1731,7 @@ app.post(
 
       const activity = new Activity({
         title,
-        date,
+        date: new Date(date),
         description,
         club,
         images: req.files ? req.files.map((file) => file.path) : [],
@@ -1652,7 +1743,7 @@ app.post(
       for (const member of members) {
         await Notification.create({
           userId: member._id,
-          message: `New activity "${title}" created for ${club} on ${date}.`,
+          message: `New activity "${title}" created for ${club} on ${new Date(date).toLocaleDateString()}.`,
           type: "activity",
         });
       }
@@ -1750,7 +1841,7 @@ app.put(
       }
 
       activity.title = title;
-      activity.date = date;
+      activity.date = new Date(date);
       activity.description = description;
       activity.club = club;
       await activity.save();
@@ -2030,34 +2121,22 @@ app.post(
 
       await Notification.create({
         userId: user._id,
-        message: `You have been added to ${club.name}.`,
+        message: `You have been added to ${club.name} as a member.`,
         type: "membership",
       });
 
-      res.status(201).json({
-        message: "Student added successfully",
-        user: {
-          _id: user._id,
-          name: user.name,
-          email: user.email,
-          rollNo: user.rollNo,
-          branch: user.branch,
-          semester: user.semester,
-          course: user.course,
-          specialization: user.specialization,
-        },
-      });
+      res.status(201).json({ message: "Student added successfully", user });
     } catch (err) {
-      console.error("Error adding student:", {
+      console.error("Add student error:", {
         message: err.message,
         stack: err.stack,
         clubId,
         userId: req.user.id,
       });
       if (err.code === 11000) {
-        return res
-          .status(400)
-          .json({ error: "Email or roll number already exists" });
+        return res.status(400).json({
+          error: "Duplicate key error: email or roll number already exists",
+        });
       }
       res.status(500).json({ error: "Server error" });
     }
@@ -2071,8 +2150,8 @@ app.post(
   isSuperAdminOrAdmin,
   async (req, res) => {
     const { club, event, date, attendance } = req.body;
-    if (!club || !event || !date || !attendance) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (!club || !event || !date || !attendance || !Array.isArray(attendance)) {
+      return res.status(400).json({ error: "Missing or invalid required fields" });
     }
 
     try {
@@ -2086,334 +2165,600 @@ app.post(
         return res.status(404).json({ error: "Event not found" });
       }
 
-      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct("_id");
-      const clubMemberIds = clubMembers.map(id => id.toString());
-      const attendanceRecords = Object.entries(attendance)
-        .filter(([userId, status]) => status && clubMemberIds.includes(userId))
-        .map(([userId, status]) => ({
-          userId,
-          status,
-        }));
+      // Validate user IDs
+      const validUserIds = await User.find({
+        _id: { $in: attendance.map((a) => a.userId) },
+        clubName: clubDoc.name,
+      }).distinct("_id");
+      const validAttendance = attendance.filter((a) =>
+        validUserIds.map((id) => id.toString()).includes(a.userId.toString())
+      );
 
-      if (attendanceRecords.length === 0) {
-        return res.status(400).json({ error: "No valid attendance records provided" });
+      const invalidUserIds = attendance
+        .filter((a) => !validUserIds.map((id) => id.toString()).includes(a.userId.toString()))
+        .map((a) => a.userId);
+
+      if (validAttendance.length === 0) {
+        console.warn("No valid users found for attendance:", {
+          clubId: club,
+          eventId: event,
+          invalidUserIds,
+          userId: req.user.id,
+        });
+        return res.status(400).json({
+          error: "No valid users found for attendance",
+          invalidUserIds,
+        });
       }
 
-      const presentCount = attendanceRecords.filter(record => record.status === "present").length;
-      const absentCount = attendanceRecords.filter(record => record.status === "absent").length;
-      const totalMarked = presentCount + absentCount;
-      const attendanceRate = clubMembers.length > 0 ? ((presentCount / clubMembers.length) * 100).toFixed(1) : 0;
+      if (invalidUserIds.length > 0) {
+        console.warn("Some user IDs are invalid or not club members:", {
+          clubId: club,
+          eventId: event,
+          invalidUserIds,
+          userId: req.user.id,
+        });
+      }
+
+      const presentCount = validAttendance.filter(
+        (a) => a.status === "present"
+      ).length;
+      const absentCount = validAttendance.length - presentCount;
+      const attendanceRate = (presentCount / validAttendance.length) * 100;
+
+      // Generate DOCX report
+      const members = await User.find(
+        { _id: { $in: validAttendance.map((a) => a.userId) } },
+        "name email rollNo branch"
+      );
+      const doc = new Document({
+        sections: [
+          {
+            properties: {},
+            children: [
+              new Paragraph({
+                text: `Attendance Report for ${eventDoc.title} (${clubDoc.name})`,
+                heading: HeadingLevel.HEADING_1,
+                alignment: "center",
+              }),
+              new Paragraph({
+                text: `Date: ${new Date(date).toLocaleDateString()}`,
+                spacing: { after: 200 },
+              }),
+              new Table({
+                rows: [
+                  new TableRow({
+                    children: [
+                      new TableCell({
+                        children: [new Paragraph("Name")],
+                        width: { size: 25, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Email")],
+                        width: { size: 25, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Roll No")],
+                        width: { size: 25, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Status")],
+                        width: { size: 25, type: WidthType.PERCENTAGE },
+                      }),
+                    ],
+                  }),
+                  ...validAttendance.map((a) => {
+                    const user = members.find(
+                      (m) => m._id.toString() === a.userId.toString()
+                    );
+                    return new TableRow({
+                      children: [
+                        new TableCell({
+                          children: [new Paragraph(user.name)],
+                        }),
+                        new TableCell({
+                          children: [new Paragraph(user.email)],
+                        }),
+                        new TableCell({
+                          children: [new Paragraph(user.rollNo || "N/A")],
+                        }),
+                        new TableCell({
+                          children: [new Paragraph(a.status)],
+                        }),
+                      ],
+                    });
+                  }),
+                ],
+                width: { size: 100, type: WidthType.PERCENTAGE },
+              }),
+              new Paragraph({
+                text: `Summary: ${presentCount} Present, ${absentCount} Absent, ${attendanceRate.toFixed(2)}% Attendance Rate`,
+                spacing: { before: 200 },
+              }),
+            ],
+          },
+        ],
+      });
+
+      const docPath = path.join(
+        __dirname,
+        "Uploads",
+        `attendance-${eventDoc._id}-${Date.now()}.docx`
+      );
+      const buffer = await Packer.toBuffer(doc);
+      fs.writeFileSync(docPath, buffer);
 
       const attendanceRecord = new Attendance({
         club,
         event,
         date: new Date(date),
-        attendance: attendanceRecords,
+        attendance: validAttendance,
         stats: {
           presentCount,
           absentCount,
-          totalMarked,
+          totalMarked: validAttendance.length,
           attendanceRate,
         },
         createdBy: req.user.id,
       });
-
       await attendanceRecord.save();
 
-      // Generate DOCX file
-      const presentStudents = await User.find({
-        _id: { $in: attendanceRecords.filter(r => r.status === "present").map(r => r.userId) },
-      }).select("name rollNo branch").lean();
-
-      const doc = new Document({
-        sections: [{
-          properties: {},
-          children: [
-            new Paragraph({
-              text: `Attendance Report for ${eventDoc.title}`,
-              heading: HeadingLevel.HEADING_1,
-              alignment: "center",
-            }),
-            new Paragraph({
-              text: `Club: ${clubDoc.name}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Date: ${new Date(date).toLocaleDateString()}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
-              spacing: { after: 200 },
-            }),
-            new Table({
-              rows: [
-                new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph("Name")], width: { size: 30, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Roll Number")], width: { size: 20, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
-                  ],
-                }),
-                ...presentStudents.map(student => new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph(student.name)] }),
-                    new TableCell({ children: [new Paragraph(student.rollNo)] }),
-                    new TableCell({ children: [new Paragraph(student.branch)] }),
-                  ],
-                })),
-              ],
-              width: { size: 100, type: WidthType.PERCENTAGE },
-            }),
-          ],
-        }],
-      });
-
-      const buffer = await Packer.toBuffer(doc);
-      const docFileName = `Attendance_${eventDoc.title}_${Date.now()}.docx`;
-      const docFilePath = path.join(__dirname, "Uploads", docFileName);
-      fs.writeFileSync(docFilePath, buffer);
-
       // Notify present students
-      for (const student of presentStudents) {
+      const presentUsers = await User.find({
+        _id: { $in: validAttendance.filter((a) => a.status === "present").map((a) => a.userId) },
+      });
+      for (const user of presentUsers) {
         await Notification.create({
-          userId: student._id,
-          message: `Your attendance has been marked as present for "${eventDoc.title}" on ${new Date(date).toLocaleDateString()}.`,
+          userId: user._id,
+          message: `Your attendance has been marked as present for ${eventDoc.title} in ${clubDoc.name}.`,
           type: "attendance",
         });
       }
 
+      // Email DOCX report to HEAD_EMAIL
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: process.env.HEAD_EMAIL,
+        subject: `Attendance Report for ${eventDoc.title} (${clubDoc.name})`,
+        text: `Please find attached the attendance report for ${eventDoc.title} held on ${new Date(date).toLocaleDateString()}.`,
+        attachments: [
+          {
+            filename: `attendance-${eventDoc.title}-${Date.now()}.docx`,
+            path: docPath,
+          },
+        ],
+      });
+
       res.status(201).json({
         message: "Attendance recorded successfully",
-        attendance: {
-          ...attendanceRecord._doc,
-          docLink: `http://localhost:5000/uploads/${docFileName}`,
-        },
+        docLink: `http://localhost:5000/${docPath}`,
+        invalidUserIds,
       });
     } catch (err) {
-      console.error("Error creating attendance:", err);
-      res.status(500).json({ error: "Server error" });
-    }
-  }
-);
-
-// Get Present Students for an Event
-app.get(
-  "/api/attendance/:eventId/present",
-  authenticateToken,
-  isSuperAdminOrAdmin,
-  async (req, res) => {
-    try {
-      const { eventId } = req.params;
-      const attendanceRecord = await Attendance.findOne({ event: eventId })
-        .populate({
-          path: "attendance.userId",
-          select: "name email rollNo branch",
-        })
-        .lean();
-
-      if (!attendanceRecord) {
-        return res.status(404).json({ error: "Attendance record not found for this event" });
-      }
-
-      const presentStudents = attendanceRecord.attendance
-        .filter(record => record.status === "present")
-        .map(record => ({
-          _id: record.userId._id,
-          name: record.userId.name,
-          email: record.userId.email,
-          rollNo: record.userId.rollNo,
-          branch: record.userId.branch,
-        }));
-
-      res.json({
-        eventId,
-        presentStudents,
-        totalPresent: presentStudents.length,
+      console.error("Attendance creation error:", {
+        message: err.message,
+        stack: err.stack,
+        clubId: club,
+        eventId: event,
+        userId: req.user.id,
       });
-    } catch (err) {
-      console.error("Error fetching present students:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
 );
 
 // Get Attendance Records
-app.get(
-  "/api/attendance",
-  authenticateToken,
-  isSuperAdminOrAdmin,
-  async (req, res) => {
-    try {
-      const { club, event } = req.query;
-      const query = {};
-      if (club) query.club = club;
-      if (event) query.event = event;
+app.get("/api/attendance", authenticateToken, async (req, res) => {
+  try {
+    const { club, event } = req.query;
+    const query = {};
+    if (club) query.club = club;
+    if (event) query.event = event;
 
-      const attendanceRecords = await Attendance.find(query)
-        .populate("club", "name")
-        .populate("event", "title")
-        .populate("createdBy", "name email");
-      res.json(attendanceRecords);
-    } catch (err) {
-      console.error("Error fetching attendance records:", err);
-      res.status(500).json({ error: "Server error" });
-    }
-  }
-);
-
-// Update Attendance Record
-app.put(
-  "/api/attendance/:id",
-  authenticateToken,
-  isSuperAdminOrAdmin,
-  async (req, res) => {
-    const { id } = req.params;
-    const { attendance } = req.body;
-    if (!attendance) {
-      return res.status(400).json({ error: "Attendance data is required" });
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
     }
 
-    try {
-      const attendanceRecord = await Attendance.findById(id);
-      if (!attendanceRecord) {
-        return res.status(404).json({ error: "Attendance record not found" });
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (!user.isAdmin && !superAdminEmails.includes(user.email)) {
+      if (!user.isHeadCoordinator || !user.headCoordinatorClubs.length) {
+        return res.status(403).json({ error: "Access denied" });
       }
+      const clubs = await Club.find({
+        name: { $in: user.headCoordinatorClubs },
+      }).distinct("_id");
+      query.club = { $in: clubs };
+    }
 
-      const clubDoc = await Club.findById(attendanceRecord.club);
+    const attendanceRecords = await Attendance.find(query)
+      .populate("club", "name")
+      .populate("event", "title")
+      .populate("createdBy", "name email");
+    res.json(attendanceRecords);
+  } catch (err) {
+    console.error("Error fetching attendance records:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user.id,
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Create Lecture
+app.post(
+  "/api/lectures",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    const { title, club } = req.body;
+    if (!title || !club) {
+      return res.status(400).json({ error: "Title and club are required" });
+    }
+
+    try {
+      const clubDoc = await Club.findById(club);
       if (!clubDoc) {
         return res.status(404).json({ error: "Club not found" });
       }
 
-      const eventDoc = await Event.findById(attendanceRecord.event);
-      if (!eventDoc) {
-        return res.status(404).json({ error: "Event not found" });
-      }
-
-      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct("_id");
-      const clubMemberIds = clubMembers.map(id => id.toString());
-      const updatedAttendance = Object.entries(attendance)
-        .filter(([userId, status]) => status && clubMemberIds.includes(userId))
-        .map(([userId, status]) => ({
-          userId,
-          status,
-        }));
-
-      if (updatedAttendance.length === 0) {
-        return res.status(400).json({ error: "No valid attendance records provided" });
-      }
-
-      const presentCount = updatedAttendance.filter(record => record.status === "present").length;
-      const absentCount = updatedAttendance.filter(record => record.status === "absent").length;
-      const totalMarked = presentCount + absentCount;
-      const attendanceRate = clubMembers.length > 0 ? ((presentCount / clubMembers.length) * 100).toFixed(1) : 0;
-
-      attendanceRecord.attendance = updatedAttendance;
-      attendanceRecord.stats = {
-        presentCount,
-        absentCount,
-        totalMarked,
-        attendanceRate,
-      };
-      await attendanceRecord.save();
-
-      // Generate updated DOCX file
-      const presentStudents = await User.find({
-        _id: { $in: updatedAttendance.filter(r => r.status === "present").map(r => r.userId) },
-      }).select("name rollNo branch").lean();
-
-      const doc = new Document({
-        sections: [{
-          properties: {},
-          children: [
-            new Paragraph({
-              text: `Attendance Report for ${eventDoc.title}`,
-              heading: HeadingLevel.HEADING_1,
-              alignment: "center",
-            }),
-            new Paragraph({
-              text: `Club: ${clubDoc.name}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Date: ${new Date(attendanceRecord.date).toLocaleDateString()}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
-              spacing: { after: 200 },
-            }),
-            new Table({
-              rows: [
-                new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph("Name")], width: { size: 30, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Roll Number")], width: { size: 20, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
-                  ],
-                }),
-                ...presentStudents.map(student => new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph(student.name)] }),
-                    new TableCell({ children: [new Paragraph(student.rollNo)] }),
-                    new TableCell({ children: [new Paragraph(student.branch)] }),
-                  ],
-                })),
-              ],
-              width: { size: 100, type: WidthType.PERCENTAGE },
-            }),
-          ],
-        }],
+      const lecture = new Lecture({
+        title,
+        club,
+        createdBy: req.user.id,
       });
+      await lecture.save();
 
-      const buffer = await Packer.toBuffer(doc);
-      const docFileName = `Attendance_${eventDoc.title}_${Date.now()}.docx`;
-      const docFilePath = path.join(__dirname, "Uploads", docFileName);
-      fs.writeFileSync(docFilePath, buffer);
+      res.status(201).json({ message: "Lecture created successfully", lecture });
+    } catch (err) {
+      console.error("Lecture creation error:", {
+        message: err.message,
+        stack: err.stack,
+        clubId: club,
+        userId: req.user.id,
+      });
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
 
-      // Notify updated present students
-      for (const student of presentStudents) {
+// Get Lectures
+app.get("/api/lectures", authenticateToken, async (req, res) => {
+  try {
+    const { club } = req.query;
+    const query = club ? { club } : {};
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (!user.isAdmin && !superAdminEmails.includes(user.email)) {
+      if (!user.isHeadCoordinator || !user.headCoordinatorClubs.length) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      const clubs = await Club.find({
+        name: { $in: user.headCoordinatorClubs },
+      }).distinct("_id");
+      query.club = { $in: clubs };
+    }
+
+    const lectures = await Lecture.find(query)
+      .populate("club", "name")
+      .populate("createdBy", "name email");
+    res.json(lectures);
+  } catch (err) {
+    console.error("Error fetching lectures:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user.id,
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Create Practice Session Attendance
+app.post(
+  "/api/practice-attendance",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    const { club, lecture, date, roomNo, attendance } = req.body;
+    if (!club || !lecture || !date || !roomNo || !attendance || !Array.isArray(attendance)) {
+      return res.status(400).json({ error: "Missing or invalid required fields" });
+    }
+
+    try {
+      const clubDoc = await Club.findById(club);
+      if (!clubDoc) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      const lectureDoc = await Lecture.findById(lecture);
+      if (!lectureDoc) {
+        return res.status(404).json({ error: "Lecture not found" });
+      }
+
+      // Validate user IDs
+      const validUserIds = await User.find({
+        _id: { $in: attendance.map((a) => a.userId) },
+        clubName: clubDoc.name,
+      }).distinct("_id");
+      const validAttendance = attendance.filter((a) =>
+        validUserIds.map((id) => id.toString()).includes(a.userId.toString())
+      );
+
+      const invalidUserIds = attendance
+        .filter((a) => !validUserIds.map((id) => id.toString()).includes(a.userId.toString()))
+        .map((a) => a.userId);
+
+      if (validAttendance.length === 0) {
+        console.warn("No valid users found for practice attendance:", {
+          clubId: club,
+          lectureId: lecture,
+          invalidUserIds,
+          userId: req.user.id,
+        });
+        return res.status(400).json({
+          error: "No valid users found for practice attendance",
+          invalidUserIds,
+        });
+      }
+
+      if (invalidUserIds.length > 0) {
+        console.warn("Some user IDs are invalid or not club members:", {
+          clubId: club,
+          lectureId: lecture,
+          invalidUserIds,
+          userId: req.user.id,
+        });
+      }
+
+      const presentCount = validAttendance.filter(
+        (a) => a.status === "present"
+      ).length;
+      const absentCount = validAttendance.length - presentCount;
+      const attendanceRate = (presentCount / validAttendance.length) * 100;
+
+      const practiceAttendance = new PracticeAttendance({
+        club,
+        lecture,
+        date: new Date(date),
+        roomNo,
+        attendance: validAttendance,
+        stats: {
+          presentCount,
+          absentCount,
+          totalMarked: validAttendance.length,
+          attendanceRate,
+        },
+        createdBy: req.user.id,
+      });
+      await practiceAttendance.save();
+
+      const presentUsers = await User.find({
+        _id: { $in: validAttendance.filter((a) => a.status === "present").map((a) => a.userId) },
+      });
+      for (const user of presentUsers) {
         await Notification.create({
-          userId: student._id,
-          message: `Your attendance has been updated as present for "${eventDoc.title}" on ${new Date(attendanceRecord.date).toLocaleDateString()}.`,
+          userId: user._id,
+          message: `Your attendance has been marked as present for the practice session "${lectureDoc.title}" in ${clubDoc.name}.`,
           type: "attendance",
         });
       }
 
-      res.json({
-        message: "Attendance updated successfully",
-        attendance: {
-          ...attendanceRecord._doc,
-          docLink: `http://localhost:5000/uploads/${docFileName}`,
-        },
+      res.status(201).json({
+        message: "Practice attendance recorded successfully",
+        practiceAttendance,
+        invalidUserIds,
       });
     } catch (err) {
-      console.error("Error updating attendance:", err);
+      console.error("Practice attendance creation error:", {
+        message: err.message,
+        stack: err.stack,
+        clubId: club,
+        lectureId: lecture,
+        userId: req.user.id,
+      });
       res.status(500).json({ error: "Server error" });
     }
   }
 );
 
-// Delete Attendance Record
-app.delete(
-  "/api/attendance/:id",
+// Get Practice Attendance Records
+app.get("/api/practice-attendance", authenticateToken, async (req, res) => {
+  try {
+    const { club, lecture } = req.query;
+    const query = {};
+    if (club) query.club = club;
+    if (lecture) query.lecture = lecture;
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (!user.isAdmin && !superAdminEmails.includes(user.email)) {
+      if (!user.isHeadCoordinator || !user.headCoordinatorClubs.length) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      const clubs = await Club.find({
+        name: { $in: user.headCoordinatorClubs },
+      }).distinct("_id");
+      query.club = { $in: clubs };
+    }
+
+    const practiceAttendanceRecords = await PracticeAttendance.find(query)
+      .populate("club", "name")
+      .populate("lecture", "title")
+      .populate("createdBy", "name email");
+    res.json(practiceAttendanceRecords);
+  } catch (err) {
+    console.error("Error fetching practice attendance records:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user.id,
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+
+// Get Present Students for Practice Session
+app.get(
+  "/api/practice-attendance/:lectureId/present",
   authenticateToken,
-  isSuperAdminOrAdmin,
   async (req, res) => {
     try {
-      const attendanceRecord = await Attendance.findById(req.params.id);
-      if (!attendanceRecord) {
-        return res.status(404).json({ error: "Attendance record not found" });
+      const { lectureId } = req.params;
+      const lecture = await Lecture.findById(lectureId);
+      if (!lecture) {
+        return res.status(404).json({ error: "Lecture not found" });
       }
 
-      await attendanceRecord.deleteOne();
-      res.json({ message: "Attendance record deleted successfully" });
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+        : [];
+      const club = await Club.findById(lecture.club);
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      if (
+        !user.isAdmin &&
+        !superAdminEmails.includes(user.email) &&
+        (!user.isHeadCoordinator ||
+          !user.headCoordinatorClubs.includes(club.name))
+      ) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const practiceAttendance = await PracticeAttendance.find({ lecture: lectureId });
+      const presentStudents = practiceAttendance
+        .map((record) =>
+          record.attendance
+            .filter((a) => a.status === "present")
+            .map((a) => a.userId)
+        )
+        .flat();
+
+      const users = await User.find(
+        { _id: { $in: presentStudents } },
+        "name email rollNo branch"
+      );
+      res.json(users);
     } catch (err) {
-      console.error("Error deleting attendance:", err);
+      console.error("Error fetching present students:", {
+        message: err.message,
+        stack: err.stack,
+        lectureId: req.params.lectureId,
+        userId: req.user.id,
+      });
       res.status(500).json({ error: "Server error" });
     }
   }
 );
+
+// Validate User IDs
+app.post("/api/users/validate", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
+  const { clubId, userIds } = req.body;
+  if (!clubId || !userIds || !Array.isArray(userIds)) {
+    return res.status(400).json({ error: "clubId and userIds (array) are required" });
+  }
+
+  try {
+    const club = await Club.findById(clubId);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    const validUsers = await User.find({
+      _id: { $in: userIds },
+      clubName: club.name,
+    }).select("_id name email rollNo");
+
+    const validUserIds = validUsers.map((user) => user._id.toString());
+    const invalidUserIds = userIds.filter((id) => !validUserIds.includes(id.toString()));
+
+    if (invalidUserIds.length > 0) {
+      console.warn("Invalid user IDs provided:", {
+        clubId,
+        invalidUserIds,
+        userId: req.user.id,
+      });
+    }
+
+    res.json({
+      validUsers: validUsers.map((user) => ({
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        rollNo: user.rollNo || "N/A",
+      })),
+      invalidUserIds,
+    });
+  } catch (err) {
+    console.error("User validation error:", {
+      message: err.message,
+      stack: err.stack,
+      clubId,
+      userId: req.user.id,
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// GET /api/attendance/:id/present
+app.get("/api/attendance/:id/present", authenticateToken, async (req, res) => {
+  try {
+    const attendance = await Attendance.findById(req.params.id)
+      .populate("event", "title")
+      .populate("presentStudents", "name rollNo email branch semester");
+    if (!attendance) {
+      return res.status(404).json({ error: "Attendance record not found" });
+    }
+    res.json({
+      presentStudents: attendance.presentStudents || [],
+      event: attendance.event || { title: "N/A" },
+    });
+  } catch (err) {
+    console.error("Fetch present students error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/api/practice-attendance/:id/present", authenticateToken, async (req, res) => {
+  try {
+    const practiceAttendance = await PracticeAttendance.findById(req.params.id)
+      .populate("lecture", "title")
+      .populate("presentStudents", "name rollNo email branch semester");
+    if (!practiceAttendance) {
+      return res.status(404).json({ error: "Practice attendance record not found" });
+    }
+    res.json({
+      presentStudents: practiceAttendance.presentStudents || [],
+      lecture: practiceAttendance.lecture || { title: "N/A" },
+    });
+  } catch (err) {
+    console.error("Fetch practice present students error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // Start Server
 const PORT = process.env.PORT || 5000;
