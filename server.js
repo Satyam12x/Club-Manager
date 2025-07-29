@@ -8,7 +8,17 @@ const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType } = require("docx");
+const {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  HeadingLevel,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+} = require("docx");
 
 dotenv.config();
 
@@ -127,6 +137,7 @@ const eventSchema = new mongoose.Schema({
     ref: "User",
     required: true,
   },
+  registeredUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Add this line
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -283,7 +294,11 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
       return next();
     }
 
-    const clubId = req.body.club || req.query.club || req.body.event?.club || req.params.clubId;
+    const clubId =
+      req.body.club ||
+      req.query.club ||
+      req.body.event?.club ||
+      req.params.clubId;
     if (!clubId) {
       console.error("isSuperAdminOrAdmin: Club ID not provided in request");
       return res.status(400).json({ error: "Club ID is required" });
@@ -959,9 +974,9 @@ app.patch(
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-            .split(",")
-            .map((email) => email.trim())
-            .filter((email) => email)
+              .split(",")
+              .map((email) => email.trim())
+              .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
@@ -994,9 +1009,9 @@ app.patch(
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
           ? superAdmins
-            .split(",")
-            .map((id) => id.trim())
-            .filter((id) => id)
+              .split(",")
+              .map((id) => id.trim())
+              .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
@@ -1474,7 +1489,8 @@ app.get("/api/events", authenticateToken, async (req, res) => {
     const query = club ? { club } : {};
     const events = await Event.find(query)
       .populate("club", "name")
-      .populate("createdBy", "name email");
+      .populate("createdBy", "name email")
+      .populate("registeredUsers", "_id"); // Populate registeredUsers with _id
     const transformedEvents = events.map((event) => ({
       ...event._doc,
       banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
@@ -1612,6 +1628,37 @@ app.delete(
     }
   }
 );
+
+app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const userId = req.user.id;
+    if (event.registeredUsers.some((id) => id.toString() === userId)) {
+      return res
+        .status(400)
+        .json({ error: "User already registered for this event" });
+    }
+
+    event.registeredUsers.push(userId);
+    await event.save();
+
+    const club = await Club.findById(event.club);
+    await Notification.create({
+      userId,
+      message: `You have successfully registered for the event "${event.title}" in ${club.name}.`,
+      type: "event",
+    });
+
+    res.json({ message: "Successfully registered for the event" });
+  } catch (err) {
+    console.error("Error registering for event:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // Create Activity
 app.post(
@@ -1971,11 +2018,18 @@ app.post(
   isSuperAdminOrAdmin,
   async (req, res) => {
     const { clubId } = req.params;
-    const { name, email, rollNo, branch, semester, course, specialization } = req.body;
-    if (!name || !email || !rollNo || !branch || !semester || !course || !specialization) {
-      return res
-        .status(400)
-        .json({ error: "All fields are required" });
+    const { name, email, rollNo, branch, semester, course, specialization } =
+      req.body;
+    if (
+      !name ||
+      !email ||
+      !rollNo ||
+      !branch ||
+      !semester ||
+      !course ||
+      !specialization
+    ) {
+      return res.status(400).json({ error: "All fields are required" });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: "Invalid email address" });
@@ -2086,8 +2140,10 @@ app.post(
         return res.status(404).json({ error: "Event not found" });
       }
 
-      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct("_id");
-      const clubMemberIds = clubMembers.map(id => id.toString());
+      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct(
+        "_id"
+      );
+      const clubMemberIds = clubMembers.map((id) => id.toString());
       const attendanceRecords = Object.entries(attendance)
         .filter(([userId, status]) => status && clubMemberIds.includes(userId))
         .map(([userId, status]) => ({
@@ -2096,13 +2152,22 @@ app.post(
         }));
 
       if (attendanceRecords.length === 0) {
-        return res.status(400).json({ error: "No valid attendance records provided" });
+        return res
+          .status(400)
+          .json({ error: "No valid attendance records provided" });
       }
 
-      const presentCount = attendanceRecords.filter(record => record.status === "present").length;
-      const absentCount = attendanceRecords.filter(record => record.status === "absent").length;
+      const presentCount = attendanceRecords.filter(
+        (record) => record.status === "present"
+      ).length;
+      const absentCount = attendanceRecords.filter(
+        (record) => record.status === "absent"
+      ).length;
       const totalMarked = presentCount + absentCount;
-      const attendanceRate = clubMembers.length > 0 ? ((presentCount / clubMembers.length) * 100).toFixed(1) : 0;
+      const attendanceRate =
+        clubMembers.length > 0
+          ? ((presentCount / clubMembers.length) * 100).toFixed(1)
+          : 0;
 
       const attendanceRecord = new Attendance({
         club,
@@ -2122,51 +2187,77 @@ app.post(
 
       // Generate DOCX file
       const presentStudents = await User.find({
-        _id: { $in: attendanceRecords.filter(r => r.status === "present").map(r => r.userId) },
-      }).select("name rollNo branch").lean();
+        _id: {
+          $in: attendanceRecords
+            .filter((r) => r.status === "present")
+            .map((r) => r.userId),
+        },
+      })
+        .select("name rollNo branch")
+        .lean();
 
       const doc = new Document({
-        sections: [{
-          properties: {},
-          children: [
-            new Paragraph({
-              text: `Attendance Report for ${eventDoc.title}`,
-              heading: HeadingLevel.HEADING_1,
-              alignment: "center",
-            }),
-            new Paragraph({
-              text: `Club: ${clubDoc.name}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Date: ${new Date(date).toLocaleDateString()}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
-              spacing: { after: 200 },
-            }),
-            new Table({
-              rows: [
-                new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph("Name")], width: { size: 30, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Roll Number")], width: { size: 20, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
-                  ],
-                }),
-                ...presentStudents.map(student => new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph(student.name)] }),
-                    new TableCell({ children: [new Paragraph(student.rollNo)] }),
-                    new TableCell({ children: [new Paragraph(student.branch)] }),
-                  ],
-                })),
-              ],
-              width: { size: 100, type: WidthType.PERCENTAGE },
-            }),
-          ],
-        }],
+        sections: [
+          {
+            properties: {},
+            children: [
+              new Paragraph({
+                text: `Attendance Report for ${eventDoc.title}`,
+                heading: HeadingLevel.HEADING_1,
+                alignment: "center",
+              }),
+              new Paragraph({
+                text: `Club: ${clubDoc.name}`,
+                heading: HeadingLevel.HEADING_2,
+              }),
+              new Paragraph({
+                text: `Date: ${new Date(date).toLocaleDateString()}`,
+                heading: HeadingLevel.HEADING_2,
+              }),
+              new Paragraph({
+                text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
+                spacing: { after: 200 },
+              }),
+              new Table({
+                rows: [
+                  new TableRow({
+                    children: [
+                      new TableCell({
+                        children: [new Paragraph("Name")],
+                        width: { size: 30, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Roll Number")],
+                        width: { size: 20, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Branch")],
+                        width: { size: 50, type: WidthType.PERCENTAGE },
+                      }),
+                    ],
+                  }),
+                  ...presentStudents.map(
+                    (student) =>
+                      new TableRow({
+                        children: [
+                          new TableCell({
+                            children: [new Paragraph(student.name)],
+                          }),
+                          new TableCell({
+                            children: [new Paragraph(student.rollNo)],
+                          }),
+                          new TableCell({
+                            children: [new Paragraph(student.branch)],
+                          }),
+                        ],
+                      })
+                  ),
+                ],
+                width: { size: 100, type: WidthType.PERCENTAGE },
+              }),
+            ],
+          },
+        ],
       });
 
       const buffer = await Packer.toBuffer(doc);
@@ -2178,7 +2269,9 @@ app.post(
       for (const student of presentStudents) {
         await Notification.create({
           userId: student._id,
-          message: `Your attendance has been marked as present for "${eventDoc.title}" on ${new Date(date).toLocaleDateString()}.`,
+          message: `Your attendance has been marked as present for "${
+            eventDoc.title
+          }" on ${new Date(date).toLocaleDateString()}.`,
           type: "attendance",
         });
       }
@@ -2213,12 +2306,14 @@ app.get(
         .lean();
 
       if (!attendanceRecord) {
-        return res.status(404).json({ error: "Attendance record not found for this event" });
+        return res
+          .status(404)
+          .json({ error: "Attendance record not found for this event" });
       }
 
       const presentStudents = attendanceRecord.attendance
-        .filter(record => record.status === "present")
-        .map(record => ({
+        .filter((record) => record.status === "present")
+        .map((record) => ({
           _id: record.userId._id,
           name: record.userId.name,
           email: record.userId.email,
@@ -2290,8 +2385,10 @@ app.put(
         return res.status(404).json({ error: "Event not found" });
       }
 
-      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct("_id");
-      const clubMemberIds = clubMembers.map(id => id.toString());
+      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct(
+        "_id"
+      );
+      const clubMemberIds = clubMembers.map((id) => id.toString());
       const updatedAttendance = Object.entries(attendance)
         .filter(([userId, status]) => status && clubMemberIds.includes(userId))
         .map(([userId, status]) => ({
@@ -2300,13 +2397,22 @@ app.put(
         }));
 
       if (updatedAttendance.length === 0) {
-        return res.status(400).json({ error: "No valid attendance records provided" });
+        return res
+          .status(400)
+          .json({ error: "No valid attendance records provided" });
       }
 
-      const presentCount = updatedAttendance.filter(record => record.status === "present").length;
-      const absentCount = updatedAttendance.filter(record => record.status === "absent").length;
+      const presentCount = updatedAttendance.filter(
+        (record) => record.status === "present"
+      ).length;
+      const absentCount = updatedAttendance.filter(
+        (record) => record.status === "absent"
+      ).length;
       const totalMarked = presentCount + absentCount;
-      const attendanceRate = clubMembers.length > 0 ? ((presentCount / clubMembers.length) * 100).toFixed(1) : 0;
+      const attendanceRate =
+        clubMembers.length > 0
+          ? ((presentCount / clubMembers.length) * 100).toFixed(1)
+          : 0;
 
       attendanceRecord.attendance = updatedAttendance;
       attendanceRecord.stats = {
@@ -2319,51 +2425,79 @@ app.put(
 
       // Generate updated DOCX file
       const presentStudents = await User.find({
-        _id: { $in: updatedAttendance.filter(r => r.status === "present").map(r => r.userId) },
-      }).select("name rollNo branch").lean();
+        _id: {
+          $in: updatedAttendance
+            .filter((r) => r.status === "present")
+            .map((r) => r.userId),
+        },
+      })
+        .select("name rollNo branch")
+        .lean();
 
       const doc = new Document({
-        sections: [{
-          properties: {},
-          children: [
-            new Paragraph({
-              text: `Attendance Report for ${eventDoc.title}`,
-              heading: HeadingLevel.HEADING_1,
-              alignment: "center",
-            }),
-            new Paragraph({
-              text: `Club: ${clubDoc.name}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Date: ${new Date(attendanceRecord.date).toLocaleDateString()}`,
-              heading: HeadingLevel.HEADING_2,
-            }),
-            new Paragraph({
-              text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
-              spacing: { after: 200 },
-            }),
-            new Table({
-              rows: [
-                new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph("Name")], width: { size: 30, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Roll Number")], width: { size: 20, type: WidthType.PERCENTAGE } }),
-                    new TableCell({ children: [new Paragraph("Branch")], width: { size: 50, type: WidthType.PERCENTAGE } }),
-                  ],
-                }),
-                ...presentStudents.map(student => new TableRow({
-                  children: [
-                    new TableCell({ children: [new Paragraph(student.name)] }),
-                    new TableCell({ children: [new Paragraph(student.rollNo)] }),
-                    new TableCell({ children: [new Paragraph(student.branch)] }),
-                  ],
-                })),
-              ],
-              width: { size: 100, type: WidthType.PERCENTAGE },
-            }),
-          ],
-        }],
+        sections: [
+          {
+            properties: {},
+            children: [
+              new Paragraph({
+                text: `Attendance Report for ${eventDoc.title}`,
+                heading: HeadingLevel.HEADING_1,
+                alignment: "center",
+              }),
+              new Paragraph({
+                text: `Club: ${clubDoc.name}`,
+                heading: HeadingLevel.HEADING_2,
+              }),
+              new Paragraph({
+                text: `Date: ${new Date(
+                  attendanceRecord.date
+                ).toLocaleDateString()}`,
+                heading: HeadingLevel.HEADING_2,
+              }),
+              new Paragraph({
+                text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
+                spacing: { after: 200 },
+              }),
+              new Table({
+                rows: [
+                  new TableRow({
+                    children: [
+                      new TableCell({
+                        children: [new Paragraph("Name")],
+                        width: { size: 30, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Roll Number")],
+                        width: { size: 20, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Branch")],
+                        width: { size: 50, type: WidthType.PERCENTAGE },
+                      }),
+                    ],
+                  }),
+                  ...presentStudents.map(
+                    (student) =>
+                      new TableRow({
+                        children: [
+                          new TableCell({
+                            children: [new Paragraph(student.name)],
+                          }),
+                          new TableCell({
+                            children: [new Paragraph(student.rollNo)],
+                          }),
+                          new TableCell({
+                            children: [new Paragraph(student.branch)],
+                          }),
+                        ],
+                      })
+                  ),
+                ],
+                width: { size: 100, type: WidthType.PERCENTAGE },
+              }),
+            ],
+          },
+        ],
       });
 
       const buffer = await Packer.toBuffer(doc);
@@ -2375,7 +2509,9 @@ app.put(
       for (const student of presentStudents) {
         await Notification.create({
           userId: student._id,
-          message: `Your attendance has been updated as present for "${eventDoc.title}" on ${new Date(attendanceRecord.date).toLocaleDateString()}.`,
+          message: `Your attendance has been updated as present for "${
+            eventDoc.title
+          }" on ${new Date(attendanceRecord.date).toLocaleDateString()}.`,
           type: "attendance",
         });
       }
