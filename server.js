@@ -7,7 +7,7 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
+const fs = require("fs").promises;
 const {
   Document,
   Packer,
@@ -20,8 +20,6 @@ const {
   WidthType,
 } = require("docx");
 
-
-//satyam
 dotenv.config();
 
 const app = express();
@@ -82,7 +80,9 @@ const userSchema = new mongoose.Schema({
   isAdmin: { type: Boolean, default: false },
   isHeadCoordinator: { type: Boolean, default: false },
   headCoordinatorClubs: { type: [String], default: [] },
+  isACEMStudent: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
+  clubs: [{ type: mongoose.Schema.Types.ObjectId, ref: "Club", default: [] }],
 });
 
 userSchema.pre("save", async function (next) {
@@ -120,8 +120,10 @@ const clubSchema = new mongoose.Schema({
       message: "A club can have at most 2 super admins",
     },
   },
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", default: [] }],
   memberCount: { type: Number, default: 0 },
   eventsCount: { type: Number, default: 0 },
+  creator: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
 });
 
 const Club = mongoose.model("Club", clubSchema);
@@ -139,7 +141,20 @@ const eventSchema = new mongoose.Schema({
     ref: "User",
     required: true,
   },
-  registeredUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // Add this line
+  registeredUsers: [
+    {
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      name: String,
+      email: String,
+      rollNo: String,
+      isACEMStudent: Boolean,
+    },
+  ],
+  category: {
+    type: String,
+    enum: ["Seminar", "Competition"],
+    required: true,
+  },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -186,10 +201,7 @@ const membershipRequestSchema = new mongoose.Schema({
   requestedAt: { type: Date, default: Date.now },
 });
 
-const MembershipRequest = mongoose.model(
-  "MembershipRequest",
-  membershipRequestSchema
-);
+const MembershipRequest = mongoose.model("MembershipRequest", membershipRequestSchema);
 
 const attendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
@@ -220,6 +232,37 @@ const attendanceSchema = new mongoose.Schema({
 });
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
+
+const practiceAttendanceSchema = new mongoose.Schema({
+  club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
+  title: { type: String, required: true },
+  date: { type: String, required: true },
+  roomNo: { type: String, required: true },
+  attendance: [
+    {
+      userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+      },
+      status: { type: String, enum: ["present", "absent"], required: true },
+    },
+  ],
+  stats: {
+    presentCount: { type: Number, default: 0 },
+    absentCount: { type: Number, default: 0 },
+    totalMarked: { type: Number, default: 0 },
+    attendanceRate: { type: Number, default: 0 },
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const PracticeAttendance = mongoose.model("PracticeAttendance", practiceAttendanceSchema);
 
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
@@ -272,8 +315,55 @@ const isAdmin = async (req, res, next) => {
     }
     next();
   } catch (err) {
-    console.error("Admin check error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Admin check error:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in admin check" });
+  }
+};
+
+const isSuperAdmin = async (req, res, next) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      console.error("isSuperAdmin: User not found for ID:", req.user.id);
+      return res.status(404).json({ error: "User not found" });
+    }
+    const club = await Club.findById(req.params.id);
+    if (!club) {
+      console.error("isSuperAdmin: Club not found for ID:", req.params.id);
+      return res.status(404).json({ error: "Club not found" });
+    }
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    const isAuthorized =
+      superAdminEmails.includes(user.email) ||
+      club.creator?.toString() === user._id.toString();
+    if (!isAuthorized) {
+      console.error(
+        "isSuperAdmin: User not authorized for club:",
+        club.name,
+        "User ID:",
+        user._id,
+        "Role check:",
+        {
+          isGlobalAdmin: superAdminEmails.includes(user.email),
+          isCreator: club.creator?.toString() === user._id.toString(),
+        }
+      );
+      return res.status(403).json({ error: "You are not authorized to perform this action on this club" });
+    }
+    next();
+  } catch (err) {
+    console.error("Super admin check error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      clubId: req.params.id,
+    });
+    res.status(500).json({ error: "Server error in authorization check" });
   }
 };
 
@@ -288,11 +378,8 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
 
-    if (user.isAdmin || superAdminEmails.includes(user.email)) {
-      console.log(
-        "isSuperAdminOrAdmin: User is global admin or super admin:",
-        user.email
-      );
+    if (superAdminEmails.includes(user.email)) {
+      console.log("isSuperAdminOrAdmin: User is global admin:", user.email);
       return next();
     }
 
@@ -300,7 +387,8 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
       req.body.club ||
       req.query.club ||
       req.body.event?.club ||
-      req.params.clubId;
+      req.params.clubId ||
+      req.params.id;
     if (!clubId) {
       console.error("isSuperAdminOrAdmin: Club ID not provided in request");
       return res.status(400).json({ error: "Club ID is required" });
@@ -312,17 +400,11 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
       return res.status(404).json({ error: "Club not found" });
     }
 
-    if (
-      club.superAdmins.some((id) => id.toString() === user._id.toString()) ||
-      user.headCoordinatorClubs.includes(club.name)
-    ) {
+    if (club.creator.toString() === user._id.toString()) {
       console.log(
         "isSuperAdminOrAdmin: User authorized for club:",
         club.name,
-        "as",
-        club.superAdmins.some((id) => id.toString() === user._id.toString())
-          ? "SuperAdmin"
-          : "HeadCoordinator"
+        "as Creator"
       );
       return next();
     }
@@ -331,77 +413,23 @@ const isSuperAdminOrAdmin = async (req, res, next) => {
       "isSuperAdminOrAdmin: User not authorized for club:",
       club.name,
       "User ID:",
-      user._id,
-      "HeadCoordinatorClubs:",
-      user.headCoordinatorClubs
+      user._id
     );
-    res.status(403).json({ error: "Super admin or admin access required" });
+    res.status(403).json({ error: "Creator access required" });
   } catch (err) {
     console.error("isSuperAdminOrAdmin error:", {
       message: err.message,
       stack: err.stack,
       userId: req.user?.id,
-      clubId: req.body.club || req.query.club,
+      clubId: req.body.club || req.query.club || req.params.id,
     });
-    res.status(500).json({ error: "Server error" });
-  }
-};
-
-const isSuperAdmin = async (req, res, next) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      console.error("isSuperAdmin: User not found for ID:", req.user.id);
-      return res.status(404).json({ error: "User not found" });
-    }
-    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-      : [];
-    if (superAdminEmails.includes(user.email)) {
-      console.log("isSuperAdmin: User is global super admin:", user.email);
-      return next();
-    }
-    const clubId = req.params.id || req.body.club || req.body.event?.club;
-    if (!clubId) {
-      console.error("isSuperAdmin: Club ID not provided in request");
-      return res.status(400).json({ error: "Club ID is required" });
-    }
-    const club = await Club.findById(clubId);
-    if (!club) {
-      console.error("isSuperAdmin: Club not found for ID:", clubId);
-      return res.status(404).json({ error: "Club not found" });
-    }
-    if (
-      club.superAdmins.map((id) => id.toString()).includes(user._id.toString())
-    ) {
-      console.log("isSuperAdmin: User is super admin for club:", club.name);
-      return next();
-    }
-    console.error(
-      "isSuperAdmin: User not authorized for club:",
-      club.name,
-      "User ID:",
-      user._id
-    );
-    res
-      .status(403)
-      .json({ error: "Super admin access required for this club" });
-  } catch (err) {
-    console.error("Super admin check error:", {
-      message: err.message,
-      stack: err.stack,
-      userId: req.user?.id,
-      clubId: req.params.id || req.body.club,
-    });
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error in authorization check" });
   }
 };
 
 const isHeadCoordinatorOrAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
-    const clubId = req.params.id || req.body.club || req.body.event?.club;
-    const club = clubId ? await Club.findById(clubId) : null;
     if (!user) {
       console.error(
         "isHeadCoordinatorOrAdmin: User not found for ID:",
@@ -409,31 +437,54 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
       );
       return res.status(404).json({ error: "User not found" });
     }
-    if (
-      club &&
-      !user.isAdmin &&
-      (!user.isHeadCoordinator ||
-        !user.headCoordinatorClubs.includes(club.name))
-    ) {
-      console.error(
-        "isHeadCoordinatorOrAdmin: User not authorized for club:",
-        club.name,
-        "User ID:",
-        user._id,
-        "HeadCoordinatorClubs:",
-        user.headCoordinatorClubs
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+
+    if (superAdminEmails.includes(user.email)) {
+      console.log(
+        "isHeadCoordinatorOrAdmin: User is global super admin:",
+        user.email
       );
-      return res
-        .status(403)
-        .json({ error: "Head coordinator or admin access required" });
+      return next();
     }
-    console.log(
-      "isHeadCoordinatorOrAdmin: User authorized for club:",
-      club?.name || "N/A",
-      "as",
-      user.isAdmin ? "Admin" : "HeadCoordinator"
+
+    const clubId =
+      req.params.id ||
+      req.body.club ||
+      req.body.event?.club ||
+      req.params.clubId;
+    if (!clubId) {
+      console.error(
+        "isHeadCoordinatorOrAdmin: Club ID not provided in request"
+      );
+      return res.status(400).json({ error: "Club ID is required" });
+    }
+
+    const club = await Club.findById(clubId);
+    if (!club) {
+      console.error("isHeadCoordinatorOrAdmin: Club not found for ID:", clubId);
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    if (user.headCoordinatorClubs.includes(club.name)) {
+      console.log(
+        "isHeadCoordinatorOrAdmin: User authorized for club:",
+        club.name,
+        "as HeadCoordinator"
+      );
+      return next();
+    }
+
+    console.error(
+      "isHeadCoordinatorOrAdmin: User not authorized for club:",
+      club.name,
+      "User ID:",
+      user._id,
+      "HeadCoordinatorClubs:",
+      user.headCoordinatorClubs
     );
-    next();
+    res.status(403).json({ error: "Head coordinator access required" });
   } catch (err) {
     console.error("Head coordinator check error:", {
       message: err.message,
@@ -441,7 +492,7 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
       userId: req.user?.id,
       clubId: req.params.id || req.body.club,
     });
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error in authorization check" });
   }
 };
 
@@ -524,11 +575,14 @@ app.post("/api/auth/login-password", async (req, res) => {
 });
 
 app.post("/api/auth/signup", async (req, res) => {
-  const { name, email, password, mobile, rollNo, branch } = req.body;
-  if (!name || !email || !password) {
+  const { name, email, password, mobile, rollNo, branch, isACEMStudent } =
+    req.body;
+  if (!name || !email || !password || isACEMStudent === undefined) {
     return res
       .status(400)
-      .json({ error: "Name, email, and password are required" });
+      .json({
+        error: "Name, email, password, and ACEM student status are required",
+      });
   }
   if (password.length < 6) {
     return res
@@ -560,6 +614,7 @@ app.post("/api/auth/signup", async (req, res) => {
       isAdmin,
       isHeadCoordinator,
       headCoordinatorClubs,
+      isACEMStudent,
     });
     await user.save();
 
@@ -572,7 +627,7 @@ app.post("/api/auth/signup", async (req, res) => {
     );
     res.json({ token });
   } catch (err) {
-    console.error("Signup error:", err);
+    console.error("Signup error:", { message: err.message, stack: err.stack });
     if (err.name === "ValidationError") {
       return res
         .status(400)
@@ -613,9 +668,11 @@ app.post("/api/auth/verify-otp-login", async (req, res) => {
 
 // User Profile Update
 app.put("/api/auth/user", authenticateToken, async (req, res) => {
-  const { name, email, phone } = req.body;
-  if (!name || !email) {
-    return res.status(400).json({ error: "Name and email are required" });
+  const { name, email, phone, isACEMStudent } = req.body;
+  if (!name || !email || isACEMStudent === undefined) {
+    return res
+      .status(400)
+      .json({ error: "Name, email, and ACEM student status are required" });
   }
 
   try {
@@ -634,6 +691,7 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
     user.name = name;
     user.email = email;
     user.phone = phone || user.phone;
+    user.isACEMStudent = isACEMStudent;
     await user.save();
 
     if (email !== req.user.email) {
@@ -652,24 +710,34 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
     );
     res.json({ message: "Profile updated successfully", user, token });
   } catch (err) {
-    console.error("Profile update error:", err);
+    console.error("Profile update error:", { message: err.message, stack: err.stack });
     if (err.code === 11000) {
       return res
         .status(400)
         .json({ error: "Duplicate key error: email or phone already exists" });
     }
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error in profile update" });
   }
 });
 
 // User Details Endpoint (POST)
 app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
-  const { semester, course, specialization, isClubMember, clubName, rollNo } =
-    req.body;
-  if (!semester || !course || !specialization) {
+  const {
+    semester,
+    course,
+    specialization,
+    isClubMember,
+    clubName,
+    rollNo,
+    isACEMStudent,
+  } = req.body;
+  if (!semester || !course || !specialization || isACEMStudent === undefined) {
     return res
       .status(400)
-      .json({ error: "Semester, course, and specialization are required" });
+      .json({
+        error:
+          "Semester, course, specialization, and ACEM student status are required",
+      });
   }
   if (isClubMember && (!clubName || clubName.length === 0)) {
     return res
@@ -689,12 +757,13 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
     user.rollNo = rollNo || user.rollNo;
     user.isClubMember = isClubMember;
     user.clubName = isClubMember ? clubName : [];
+    user.isACEMStudent = isACEMStudent;
     await user.save();
 
     res.status(200).json({ message: "User details saved successfully" });
   } catch (err) {
-    console.error("User details error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("User details error:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in user details update" });
   }
 });
 
@@ -721,12 +790,18 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
     }
 
     user.clubName = [...new Set([...user.clubName, ...clubName])];
+    user.clubs = [...new Set([...user.clubs, ...(await Club.find({ name: { $in: clubName } }).distinct("_id"))])];
     user.isClubMember =
       isClubMember !== undefined ? isClubMember : user.clubName.length > 0;
     await user.save();
 
     for (const name of clubName) {
-      await Club.updateOne({ name }, { $inc: { memberCount: 1 } });
+      const club = await Club.findOne({ name });
+      if (club && !club.members.includes(user._id)) {
+        club.members.push(user._id);
+        club.memberCount = await User.countDocuments({ clubName: club.name });
+        await club.save();
+      }
     }
 
     await Notification.create({
@@ -737,22 +812,24 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
 
     res.status(200).json({ message: "Club joined successfully" });
   } catch (err) {
-    console.error("Error updating user details:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error updating user details:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in user details update" });
   }
 });
 
 // Get User Data
 app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select(
-      "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo branch"
-    );
+    const user = await User.findById(req.user.id)
+      .select(
+        "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo branch isACEMStudent clubs"
+      )
+      .populate("clubs", "name");
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json(user);
   } catch (err) {
-    console.error("Error fetching user:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching user:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching user data" });
   }
 });
 
@@ -760,12 +837,12 @@ app.get("/api/auth/user", authenticateToken, async (req, res) => {
 app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
   try {
     const users = await User.find().select(
-      "name email mobile semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs createdAt rollNo branch"
-    );
+      "name email mobile semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs createdAt rollNo branch isACEMStudent clubs"
+    ).populate("clubs", "name");
     res.json(users);
   } catch (err) {
-    console.error("Error fetching users:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching users:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching users" });
   }
 });
 
@@ -774,17 +851,20 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
   try {
     const clubs = await Club.find()
       .populate("superAdmins", "name email")
+      .populate("members", "name email")
+      .populate("creator", "name email")
       .lean();
 
-    // Dynamically calculate memberCount and eventsCount for each club
     const clubsWithCounts = await Promise.all(
       clubs.map(async (club) => {
-        const memberCount = await User.countDocuments({ clubName: club.name });
+        const memberCount = club.members ? club.members.length : 0;
         const eventsCount = await Event.countDocuments({ club: club._id });
         return {
           ...club,
           memberCount,
           eventsCount,
+          icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
+          banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
         };
       })
     );
@@ -796,7 +876,7 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
       stack: err.stack,
       userId: req.user.id,
     });
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error in fetching clubs" });
   }
 });
 
@@ -818,7 +898,7 @@ app.post(
       headCoordinators,
       superAdmins,
     } = req.body;
-    if (!name || !description || !category || !req.files.icon) {
+    if (!name || !description || !category || !req.files?.icon) {
       return res
         .status(400)
         .json({ error: "Name, description, category, and icon are required" });
@@ -882,6 +962,11 @@ app.post(
         }
       }
 
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
       const club = new Club({
         name,
         icon: req.files.icon[0].path,
@@ -891,10 +976,17 @@ app.post(
         contactEmail,
         headCoordinators: validHeadCoordinators,
         superAdmins: validSuperAdmins,
-        memberCount: 0,
+        members: [req.user.id],
+        memberCount: 1,
         eventsCount: 0,
+        creator: req.user.id,
       });
       await club.save();
+
+      user.clubs.push(club._id);
+      user.clubName.push(club.name);
+      user.isClubMember = true;
+      await user.save();
 
       const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
         ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
@@ -904,14 +996,20 @@ app.post(
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: superAdminEmails,
           subject: `New Club Created: ${name}`,
-          text: `A new club "${name}" has been created by ${req.user.email}.`,
+          text: `A new club "${name}" has been created by ${req.user.email}, who has joined as a member.`,
         });
       }
 
-      const populatedClub = await Club.findById(club._id).populate(
-        "superAdmins",
-        "name email"
-      );
+      await Notification.create({
+        userId: req.user.id,
+        message: `You have successfully created and joined ${name}.`,
+        type: "membership",
+      });
+
+      const populatedClub = await Club.findById(club._id)
+        .populate("superAdmins", "name email")
+        .populate("members", "name email")
+        .populate("creator", "name email");
       const transformedClub = {
         ...populatedClub._doc,
         icon: populatedClub.icon
@@ -925,16 +1023,16 @@ app.post(
         .status(201)
         .json({ message: "Club created successfully", club: transformedClub });
     } catch (err) {
-      console.error("Club creation error:", err);
+      console.error("Club creation error:", { message: err.message, stack: err.stack });
       if (err.code === 11000) {
         return res.status(400).json({ error: "Club name already exists" });
       }
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error in club creation" });
     }
   }
 );
 
-// Update Club (Super Admin only)
+// Update Club (Creator, Super Admin, or Head Coordinator only)
 app.patch(
   "/api/clubs/:id",
   authenticateToken,
@@ -952,6 +1050,10 @@ app.patch(
       headCoordinators,
       superAdmins,
     } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
 
     if (req.body.name) {
       return res.status(400).json({ error: "Club name cannot be updated" });
@@ -971,19 +1073,20 @@ app.patch(
       if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
         return res.status(400).json({ error: "Invalid contact email" });
       }
+      if (category && !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)) {
+        return res.status(400).json({ error: "Invalid category" });
+      }
 
       let validHeadCoordinators = club.headCoordinators;
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
-          ? headCoordinators
-              .split(",")
-              .map((email) => email.trim())
-              .filter((email) => email)
+          ? headCoordinators.split(",").map((email) => email.trim()).filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        validHeadCoordinators = emails.filter((email) =>
-          emailRegex.test(email)
-        );
+        validHeadCoordinators = emails.filter((email) => emailRegex.test(email));
+        if (emails.length > 0 && validHeadCoordinators.length === 0) {
+          return res.status(400).json({ error: "All provided head coordinator emails are invalid" });
+        }
         await User.updateMany(
           { email: { $in: validHeadCoordinators } },
           {
@@ -1010,66 +1113,83 @@ app.patch(
       let validSuperAdmins = club.superAdmins;
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
-          ? superAdmins
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id)
+          ? superAdmins.split(",").map((id) => id.trim()).filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
             .status(400)
             .json({ error: "A club can have at most 2 super admins" });
         }
-        const users = await User.find({ _id: { $in: adminIds } });
-        validSuperAdmins = users.map((user) => user._id);
-        if (validSuperAdmins.length !== adminIds.length) {
-          return res
-            .status(400)
-            .json({ error: "One or more super admin IDs are invalid" });
+        if (adminIds.length > 0) {
+          if (!adminIds.every((id) => mongoose.isValidObjectId(id))) {
+            return res.status(400).json({ error: "Invalid super admin ID format" });
+          }
+          const users = await User.find({ _id: { $in: adminIds } });
+          validSuperAdmins = users.map((user) => user._id);
+          if (validSuperAdmins.length !== adminIds.length) {
+            return res
+              .status(400)
+              .json({ error: "One or more super admin IDs are invalid" });
+          }
+        } else {
+          validSuperAdmins = [];
         }
       }
 
-      if (req.files.icon) {
-        if (club.icon && fs.existsSync(club.icon)) fs.unlinkSync(club.icon);
+      if (req.files?.icon) {
+        if (club.icon) {
+          try {
+            await fs.access(club.icon);
+            await fs.unlink(club.icon);
+          } catch (err) {
+            console.warn("Failed to delete old icon:", { message: err.message, path: club.icon });
+          }
+        }
         club.icon = req.files.icon[0].path;
       }
-      if (req.files.banner) {
-        if (club.banner && fs.existsSync(club.banner))
-          fs.unlinkSync(club.banner);
+      if (req.files?.banner) {
+        if (club.banner) {
+          try {
+            await fs.access(club.banner);
+            await fs.unlink(club.banner);
+          } catch (err) {
+            console.warn("Failed to delete old banner:", { message: err.message, path: club.banner });
+          }
+        }
         club.banner = req.files.banner[0].path;
       }
-      if (description) club.description = description;
-      if (category) {
-        if (
-          !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-            category
-          )
-        ) {
-          return res.status(400).json({ error: "Invalid category" });
-        }
-        club.category = category;
-      }
-      if (contactEmail !== undefined) club.contactEmail = contactEmail;
+      if (description !== undefined) club.description = description;
+      if (category) club.category = category;
+      if (contactEmail !== undefined) club.contactEmail = contactEmail || null;
       club.headCoordinators = validHeadCoordinators;
       club.superAdmins = validSuperAdmins;
 
-      club.memberCount = await User.countDocuments({ clubName: club.name });
-      club.eventsCount = await Event.countDocuments({ club: club._id });
+      club.memberCount = club.members.length;
+      try {
+        club.eventsCount = await Event.countDocuments({ club: club._id });
+      } catch (err) {
+        console.error("Error counting events:", { message: err.message, stack: err.stack });
+        club.eventsCount = 0;
+      }
 
       await club.save();
 
-      const members = await User.find({ clubName: club.name });
+      const members = await User.find({ _id: { $in: club.members } });
       const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
         ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
         : [];
       const recipients = [...members.map((m) => m.email), ...superAdminEmails];
       if (recipients.length > 0) {
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: recipients,
-          subject: `Club Updated: ${club.name}`,
-          text: `The club "${club.name}" has been updated by ${req.user.email}.`,
-        });
+        try {
+          await transporter.sendMail({
+            from: `"ACEM" <${process.env.EMAIL_USER}>`,
+            to: recipients,
+            subject: `Club Updated: ${club.name}`,
+            text: `The club "${club.name}" has been updated by ${req.user.email}.`,
+          });
+        } catch (err) {
+          console.error("Error sending update notification email:", { message: err.message, stack: err.stack });
+        }
       }
 
       for (const member of members) {
@@ -1089,25 +1209,39 @@ app.patch(
         .status(200)
         .json({ message: "Club updated successfully", club: transformedClub });
     } catch (err) {
-      console.error("Club update error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Club update error:", {
+        message: err.message,
+        stack: err.stack,
+        clubId: id,
+        userId: req.user.id,
+        requestBody: req.body,
+        files: req.files ? Object.keys(req.files) : null,
+      });
+      if (err.name === "ValidationError") {
+        return res.status(400).json({ error: `Validation error: ${err.message}` });
+      }
+      res.status(500).json({ error: "Server error in club update" });
     }
   }
 );
 
-// Delete Club (Admin only)
-app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
+// Delete Club (Creator, Super Admin, or Head Coordinator only)
+app.delete("/api/clubs/:id", authenticateToken, isSuperAdmin, async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+
     const club = await Club.findById(req.params.id);
     if (!club) {
       return res.status(404).json({ error: "Club not found" });
     }
 
-    const members = await User.find({ clubName: club.name });
+    const members = await User.find({ _id: { $in: club.members } });
     await User.updateMany(
-      { $or: [{ clubName: club.name }, { pendingClubs: club.name }] },
+      { $or: [{ clubName: club.name }, { pendingClubs: club.name }, { clubs: club._id }] },
       {
-        $pull: { clubName: club.name, pendingClubs: club.name },
+        $pull: { clubName: club.name, pendingClubs: club.name, clubs: club._id },
         $set: {
           isClubMember: { $cond: [{ $eq: ["$clubName", []] }, false, true] },
         },
@@ -1117,9 +1251,24 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
     await MembershipRequest.deleteMany({ clubName: club.name });
     await Event.deleteMany({ club: club._id });
     await Attendance.deleteMany({ club: club._id });
+    await PracticeAttendance.deleteMany({ club: club._id });
 
-    if (club.icon && fs.existsSync(club.icon)) fs.unlinkSync(club.icon);
-    if (club.banner && fs.existsSync(club.banner)) fs.unlinkSync(club.banner);
+    if (club.icon) {
+      try {
+        await fs.access(club.icon);
+        await fs.unlink(club.icon);
+      } catch (err) {
+        console.warn("Failed to delete club icon:", { message: err.message, path: club.icon });
+      }
+    }
+    if (club.banner) {
+      try {
+        await fs.access(club.banner);
+        await fs.unlink(club.banner);
+      } catch (err) {
+        console.warn("Failed to delete club banner:", { message: err.message, path: club.banner });
+      }
+    }
 
     await club.deleteOne();
 
@@ -1128,12 +1277,16 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
       : [];
     const recipients = [...members.map((m) => m.email), ...superAdminEmails];
     if (recipients.length > 0) {
-      await transporter.sendMail({
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: recipients,
-        subject: `Club Deleted: ${club.name}`,
-        text: `The club "${club.name}" has been deleted by ${req.user.email}.`,
-      });
+      try {
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: recipients,
+          subject: `Club Deleted: ${club.name}`,
+          text: `The club "${club.name}" has been deleted by ${req.user.email}.`,
+        });
+      } catch (err) {
+        console.error("Error sending deletion notification email:", { message: err.message, stack: err.stack });
+      }
     }
 
     for (const member of members) {
@@ -1146,8 +1299,8 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
 
     res.json({ message: "Club deleted successfully" });
   } catch (err) {
-    console.error("Club deletion error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Club deletion error:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in club deletion" });
   }
 });
 
@@ -1155,6 +1308,10 @@ app.delete("/api/clubs/:id", authenticateToken, isAdmin, async (req, res) => {
 app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+
     const club = await Club.findById(id);
     if (!club) {
       return res.status(404).json({ error: "Club not found" });
@@ -1165,16 +1322,21 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (user.clubName.includes(club.name)) {
+    if (user.clubs.includes(club._id) || user.clubName.includes(club.name)) {
       return res
         .status(400)
         .json({ error: "You are already a member of this club" });
     }
 
-    if (user.pendingClubs.includes(club.name)) {
+    const existingRequest = await MembershipRequest.findOne({
+      userId: user._id,
+      clubName: club.name,
+      status: "pending",
+    });
+    if (existingRequest) {
       return res
         .status(400)
-        .json({ error: "Membership request already pending" });
+        .json({ error: "You already have a pending request for this club" });
     }
 
     const membershipRequest = new MembershipRequest({
@@ -1191,12 +1353,16 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
       : [];
     const recipients = [...club.headCoordinators, ...superAdminEmails];
     if (recipients.length > 0) {
-      await transporter.sendMail({
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: recipients,
-        subject: `New Membership Request for ${club.name}`,
-        text: `User ${user.name} (${user.email}) has requested to join ${club.name}. Please review the request in the admin dashboard.`,
-      });
+      try {
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: recipients,
+          subject: `New Membership Request for ${club.name}`,
+          text: `User ${user.name} (${user.email}) has requested to join ${club.name}.`,
+        });
+      } catch (err) {
+        console.error("Error sending membership request email:", { message: err.message, stack: err.stack });
+      }
     }
 
     await Notification.create({
@@ -1205,10 +1371,10 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
       type: "membership",
     });
 
-    res.json({ message: "Membership request sent successfully" });
+    res.json({ message: "Membership request submitted successfully" });
   } catch (err) {
-    console.error("Error requesting club membership:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error submitting membership request:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in membership request" });
   }
 });
 
@@ -1225,20 +1391,24 @@ app.get("/api/membership-requests", authenticateToken, async (req, res) => {
       : [];
     let query = {};
     if (!superAdminEmails.includes(user.email)) {
-      if (!user.isHeadCoordinator || !user.headCoordinatorClubs.length) {
-        return res.status(403).json({ error: "Access denied" });
-      }
-      query.clubName = { $in: user.headCoordinatorClubs };
+      const clubs = await Club.find({
+        $or: [
+          { creator: user._id },
+          { superAdmins: user._id },
+          { name: { $in: user.headCoordinatorClubs } },
+        ],
+      }).distinct("name");
+      query.clubName = { $in: clubs };
     }
 
     const requests = await MembershipRequest.find(query).populate(
       "userId",
-      "name email mobile"
+      "name email mobile rollNo isACEMStudent"
     );
     res.json(requests);
   } catch (err) {
-    console.error("Error fetching membership requests:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching membership requests:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching membership requests" });
   }
 });
 
@@ -1246,6 +1416,7 @@ app.get("/api/membership-requests", authenticateToken, async (req, res) => {
 app.patch(
   "/api/membership-requests/:id",
   authenticateToken,
+  isSuperAdmin,
   async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
@@ -1259,20 +1430,9 @@ app.patch(
         return res.status(404).json({ error: "Membership request not found" });
       }
 
-      const user = await User.findById(req.user.id);
-      if (!user) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
-      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-        : [];
-      if (
-        !superAdminEmails.includes(user.email) &&
-        (!user.isHeadCoordinator ||
-          !user.headCoordinatorClubs.includes(request.clubName))
-      ) {
-        return res.status(403).json({ error: "Access denied" });
+      const club = await Club.findOne({ name: request.clubName });
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
       }
 
       request.status = status;
@@ -1285,24 +1445,26 @@ app.patch(
 
       if (status === "approved") {
         targetUser.clubName.push(request.clubName);
+        targetUser.clubs.push(club._id);
         targetUser.isClubMember = true;
         targetUser.pendingClubs = targetUser.pendingClubs.filter(
           (club) => club !== request.clubName
         );
+        club.members.push(targetUser._id);
+        club.memberCount = club.members.length;
         await targetUser.save();
+        await club.save();
 
-        const club = await Club.findOne({ name: request.clubName });
-        if (club) {
-          club.memberCount = await User.countDocuments({ clubName: club.name });
-          await club.save();
+        try {
+          await transporter.sendMail({
+            from: `"ACEM" <${process.env.EMAIL_USER}>`,
+            to: targetUser.email,
+            subject: `Membership Request Approved for ${request.clubName}`,
+            text: `Congratulations! Your request to join ${request.clubName} has been approved.`,
+          });
+        } catch (err) {
+          console.error("Error sending approval email:", { message: err.message, stack: err.stack });
         }
-
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: targetUser.email,
-          subject: `Membership Request Approved for ${request.clubName}`,
-          text: `Congratulations! Your request to join ${request.clubName} has been approved.`,
-        });
 
         await Notification.create({
           userId: targetUser._id,
@@ -1315,12 +1477,16 @@ app.patch(
         );
         await targetUser.save();
 
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: targetUser.email,
-          subject: `Membership Request Rejected for ${request.clubName}`,
-          text: `We regret to inform you that your request to join ${request.clubName} has been rejected.`,
-        });
+        try {
+          await transporter.sendMail({
+            from: `"ACEM" <${process.env.EMAIL_USER}>`,
+            to: targetUser.email,
+            subject: `Membership Request Rejected for ${request.clubName}`,
+            text: `We regret to inform you that your request to join ${request.clubName} has been rejected.`,
+          });
+        } catch (err) {
+          console.error("Error sending rejection email:", { message: err.message, stack: err.stack });
+        }
 
         await Notification.create({
           userId: targetUser._id,
@@ -1331,8 +1497,8 @@ app.patch(
 
       res.json({ message: `Membership request ${status} successfully` });
     } catch (err) {
-      console.error("Error updating membership request:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Error updating membership request:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in updating membership request" });
     }
   }
 );
@@ -1340,42 +1506,46 @@ app.patch(
 // Get Single Club
 app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
   try {
-    const club = await Club.findById(req.params.id).populate(
-      "superAdmins",
-      "name email"
-    );
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+
+    const club = await Club.findById(req.params.id)
+      .populate("superAdmins", "name email")
+      .populate("members", "name email")
+      .populate("creator", "name email");
     if (!club) {
       return res.status(404).json({ error: "Club not found" });
     }
-    const members = await User.countDocuments({ clubName: club.name });
     const transformedClub = {
       ...club._doc,
       icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
       banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
-      memberCount: members,
+      memberCount: club.members.length,
     };
     res.json(transformedClub);
   } catch (err) {
-    console.error("Error fetching club:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching club:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching club" });
   }
 });
 
 // Get Club Members
 app.get("/api/clubs/:id/members", authenticateToken, async (req, res) => {
   try {
-    const club = await Club.findById(req.params.id);
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+
+    const club = await Club.findById(req.params.id)
+      .populate("members", "name email mobile phone rollNo branch semester course specialization isACEMStudent");
     if (!club) {
       return res.status(404).json({ error: "Club not found" });
     }
-    const members = await User.find(
-      { clubName: club.name },
-      "name email mobile phone rollNo branch semester course specialization"
-    ).lean();
-    res.json(members);
+    res.json(club.members);
   } catch (err) {
-    console.error("Error fetching club members:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching club members:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching club members" });
   }
 });
 
@@ -1391,6 +1561,10 @@ app.delete(
     }
 
     try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+
       const club = await Club.findById(req.params.id);
       if (!club) {
         return res.status(404).json({ error: "Club not found" });
@@ -1401,17 +1575,18 @@ app.delete(
         return res.status(404).json({ error: "User not found" });
       }
 
-      if (!user.clubName.includes(club.name)) {
+      if (!user.clubName.includes(club.name) || !club.members.includes(user._id)) {
         return res
           .status(400)
           .json({ error: "User is not a member of this club" });
       }
 
       user.clubName = user.clubName.filter((name) => name !== club.name);
+      user.clubs = user.clubs.filter((id) => id.toString() !== club._id.toString());
       user.isClubMember = user.clubName.length > 0;
+      club.members = club.members.filter((id) => id.toString() !== user._id.toString());
+      club.memberCount = club.members.length;
       await user.save();
-
-      club.memberCount = await User.countDocuments({ clubName: club.name });
       await club.save();
 
       await Notification.create({
@@ -1422,27 +1597,43 @@ app.delete(
 
       res.json({ message: "Member removed successfully" });
     } catch (err) {
-      console.error("Error removing club member:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Error removing club member:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in removing club member" });
     }
   }
 );
 
-// Create Event (Super Admin only)
+// Create Event (Creator, Super Admin, or Head Coordinator only)
 app.post(
   "/api/events",
   authenticateToken,
   isSuperAdmin,
   upload.single("banner"),
   async (req, res) => {
-    const { title, description, date, time, location, club } = req.body;
-    if (!title || !description || !date || !time || !location || !club) {
+    const { title, description, date, time, location, club, category } =
+      req.body;
+    if (
+      !title ||
+      !description ||
+      !date ||
+      !time ||
+      !location ||
+      !club ||
+      !category
+    ) {
       return res
         .status(400)
-        .json({ error: "All fields are required except banner" });
+        .json({ error: "All fields including category are required" });
+    }
+    if (!["Seminar", "Competition"].includes(category)) {
+      return res.status(400).json({ error: "Invalid event category" });
     }
 
     try {
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
         return res.status(404).json({ error: "Club not found" });
@@ -1457,17 +1648,19 @@ app.post(
         club,
         banner: req.file ? req.file.path : null,
         createdBy: req.user.id,
+        category,
       });
       await event.save();
 
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
       await clubDoc.save();
 
-      const members = await User.find({ clubName: clubDoc.name });
+      const members = await User.find({ _id: { $in: clubDoc.members } });
       for (const member of members) {
         await Notification.create({
           userId: member._id,
-          message: `New event "${title}" created for ${clubDoc.name} on ${date}.`,
+          message: `New ${category.toLowerCase()} "${title}" created for ${clubDoc.name
+            } on ${date}.`,
           type: "event",
         });
       }
@@ -1478,8 +1671,8 @@ app.post(
       };
       res.status(201).json(transformedEvent);
     } catch (err) {
-      console.error("Event creation error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Event creation error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in event creation" });
     }
   }
 );
@@ -1492,24 +1685,29 @@ app.get("/api/events", authenticateToken, async (req, res) => {
     const events = await Event.find(query)
       .populate("club", "name")
       .populate("createdBy", "name email")
-      .populate("registeredUsers", "_id"); // Populate registeredUsers with _id
+      .populate("registeredUsers.userId", "name email rollNo isACEMStudent");
     const transformedEvents = events.map((event) => ({
       ...event._doc,
       banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
     }));
     res.json(transformedEvents);
   } catch (err) {
-    console.error("Error fetching events:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching events:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching events" });
   }
 });
 
 // Get Single Event
 app.get("/api/events/:id", authenticateToken, async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid event ID" });
+    }
+
     const event = await Event.findById(req.params.id)
       .populate("club", "name")
-      .populate("createdBy", "name email");
+      .populate("createdBy", "name email")
+      .populate("registeredUsers.userId", "name email rollNo isACEMStudent");
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
     }
@@ -1519,12 +1717,12 @@ app.get("/api/events/:id", authenticateToken, async (req, res) => {
     };
     res.json(transformedEvent);
   } catch (err) {
-    console.error("Error fetching event:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching event:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching event" });
   }
 });
 
-// Update Event (Super Admin only)
+// Update Event (Creator, Super Admin, or Head Coordinator only)
 app.put(
   "/api/events/:id",
   authenticateToken,
@@ -1532,15 +1730,34 @@ app.put(
   upload.single("banner"),
   async (req, res) => {
     const { id } = req.params;
-    const { title, description, date, time, location, club } = req.body;
+    const { title, description, date, time, location, club, category } =
+      req.body;
 
-    if (!title || !description || !date || !time || !location || !club) {
+    if (
+      !title ||
+      !description ||
+      !date ||
+      !time ||
+      !location ||
+      !club ||
+      !category
+    ) {
       return res
         .status(400)
-        .json({ error: "All fields are required except banner" });
+        .json({ error: "All fields including category are required" });
+    }
+    if (!["Seminar", "Competition"].includes(category)) {
+      return res.status(400).json({ error: "Invalid event category" });
     }
 
     try {
+      if (!mongoose.isValidObjectId(id)) {
+        return res.status(400).json({ error: "Invalid event ID" });
+      }
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+
       const event = await Event.findById(id);
       if (!event) {
         return res.status(404).json({ error: "Event not found" });
@@ -1551,8 +1768,13 @@ app.put(
         return res.status(404).json({ error: "Club not found" });
       }
 
-      if (req.file && event.banner && fs.existsSync(event.banner)) {
-        fs.unlinkSync(event.banner);
+      if (req.file && event.banner) {
+        try {
+          await fs.access(event.banner);
+          await fs.unlink(event.banner);
+        } catch (err) {
+          console.warn("Failed to delete old event banner:", { message: err.message, path: event.banner });
+        }
       }
 
       event.title = title;
@@ -1562,13 +1784,14 @@ app.put(
       event.location = location;
       event.club = club;
       event.banner = req.file ? req.file.path : event.banner;
+      event.category = category;
       await event.save();
 
-      const members = await User.find({ clubName: clubDoc.name });
+      const members = await User.find({ _id: { $in: clubDoc.members } });
       for (const member of members) {
         await Notification.create({
           userId: member._id,
-          message: `Event "${title}" for ${clubDoc.name} has been updated.`,
+          message: `${category} "${title}" for ${clubDoc.name} has been updated.`,
           type: "event",
         });
       }
@@ -1582,19 +1805,23 @@ app.put(
         event: transformedEvent,
       });
     } catch (err) {
-      console.error("Event update error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Event update error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in event update" });
     }
   }
 );
 
-// Delete Event (Super Admin only)
+// Delete Event (Creator, Super Admin, or Head Coordinator only)
 app.delete(
   "/api/events/:id",
   authenticateToken,
   isSuperAdmin,
   async (req, res) => {
     try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ error: "Invalid event ID" });
+      }
+
       const event = await Event.findById(req.params.id);
       if (!event) {
         return res.status(404).json({ error: "Event not found" });
@@ -1605,8 +1832,13 @@ app.delete(
         return res.status(404).json({ error: "Club not found" });
       }
 
-      if (event.banner && fs.existsSync(event.banner)) {
-        fs.unlinkSync(event.banner);
+      if (event.banner) {
+        try {
+          await fs.access(event.banner);
+          await fs.unlink(event.banner);
+        } catch (err) {
+          console.warn("Failed to delete event banner:", { message: err.message, path: event.banner });
+        }
       }
 
       await event.deleteOne();
@@ -1614,51 +1846,70 @@ app.delete(
       club.eventsCount = await Event.countDocuments({ club: club._id });
       await club.save();
 
-      const members = await User.find({ clubName: club.name });
+      const members = await User.find({ _id: { $in: club.members } });
       for (const member of members) {
         await Notification.create({
           userId: member._id,
-          message: `Event "${event.title}" for ${club.name} has been deleted.`,
+          message: `${event.category} "${event.title}" for ${club.name} has been deleted.`,
           type: "event",
         });
       }
 
       res.json({ message: "Event deleted successfully" });
     } catch (err) {
-      console.error("Event deletion error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Event deletion error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in event deletion" });
     }
   }
 );
 
+// Register for Event
 app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   try {
+    const { name, email, rollNo, isACEMStudent } = req.body;
+    if (!name || !email || !rollNo || isACEMStudent === undefined) {
+      return res
+        .status(400)
+        .json({ error: "All registration details are required" });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid event ID" });
+    }
+
     const event = await Event.findById(req.params.id);
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
     }
 
     const userId = req.user.id;
-    if (event.registeredUsers.some((id) => id.toString() === userId)) {
+    if (event.registeredUsers.some((reg) => reg.userId.toString() === userId)) {
       return res
         .status(400)
         .json({ error: "User already registered for this event" });
     }
 
-    event.registeredUsers.push(userId);
+    event.registeredUsers.push({ userId, name, email, rollNo, isACEMStudent });
     await event.save();
 
     const club = await Club.findById(event.club);
     await Notification.create({
       userId,
-      message: `You have successfully registered for the event "${event.title}" in ${club.name}.`,
+      message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title
+        }" in ${club.name}.`,
       type: "event",
     });
 
     res.json({ message: "Successfully registered for the event" });
   } catch (err) {
-    console.error("Error registering for event:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error registering for event:", { message: err.message, stack: err.stack });
+    if (err.code === 11000) {
+      return res.status(400).json({ error: "Duplicate registration details" });
+    }
+    res.status(500).json({ error: "Server error in event registration" });
   }
 });
 
@@ -1697,7 +1948,7 @@ app.post(
       });
       await activity.save();
 
-      const members = await User.find({ clubName: club });
+      const members = await User.find({ _id: { $in: clubDoc.members } });
       for (const member of members) {
         await Notification.create({
           userId: member._id,
@@ -1712,8 +1963,8 @@ app.post(
       };
       res.status(201).json(transformedActivity);
     } catch (err) {
-      console.error("Activity creation error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Activity creation error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in activity creation" });
     }
   }
 );
@@ -1722,7 +1973,19 @@ app.post(
 app.get("/api/activities", authenticateToken, async (req, res) => {
   try {
     const { club } = req.query;
-    const query = club ? { club } : {};
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    let query = club ? { club } : {};
+    if (!superAdminEmails.includes(user.email)) {
+      query.club = { $in: user.headCoordinatorClubs };
+    }
+
     const activities = await Activity.find(query).populate(
       "createdBy",
       "name email"
@@ -1733,14 +1996,18 @@ app.get("/api/activities", authenticateToken, async (req, res) => {
     }));
     res.json(transformedActivities);
   } catch (err) {
-    console.error("Error fetching activities:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching activities:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching activities" });
   }
 });
 
 // Get Single Activity
 app.get("/api/activities/:id", authenticateToken, async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid activity ID" });
+    }
+
     const activity = await Activity.findById(req.params.id).populate(
       "createdBy",
       "name email"
@@ -1754,12 +2021,12 @@ app.get("/api/activities/:id", authenticateToken, async (req, res) => {
     };
     res.json(transformedActivity);
   } catch (err) {
-    console.error("Error fetching activity:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching activity:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching activity" });
   }
 });
 
-// Update Activity
+// Update Activity (Creator, Super Admin, or Head Coordinator only)
 app.put(
   "/api/activities/:id",
   authenticateToken,
@@ -1785,15 +2052,27 @@ app.put(
       }
 
       const user = await User.findById(req.user.id);
-      if (!user.isAdmin && !user.headCoordinatorClubs.includes(club)) {
+      if (
+        !user.isAdmin &&
+        !user.headCoordinatorClubs.includes(club) &&
+        activity.createdBy.toString() !== req.user.id
+      ) {
         return res.status(403).json({
-          error: "You are not authorized to update activities for this club",
+          error: "You are not authorized to update this activity",
         });
       }
 
       if (req.files && req.files.length > 0) {
-        for (const img of activity.images) {
-          if (fs.existsSync(img)) fs.unlinkSync(img);
+        for (const oldImage of activity.images) {
+          try {
+            await fs.access(oldImage);
+            await fs.unlink(oldImage);
+          } catch (err) {
+            console.warn("Failed to delete old activity image:", {
+              message: err.message,
+              path: oldImage,
+            });
+          }
         }
         activity.images = req.files.map((file) => file.path);
       }
@@ -1804,7 +2083,7 @@ app.put(
       activity.club = club;
       await activity.save();
 
-      const members = await User.find({ clubName: club });
+      const members = await User.find({ _id: { $in: clubDoc.members } });
       for (const member of members) {
         await Notification.create({
           userId: member._id,
@@ -1822,19 +2101,23 @@ app.put(
         activity: transformedActivity,
       });
     } catch (err) {
-      console.error("Activity update error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Activity update error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in activity update" });
     }
   }
 );
 
-// Delete Activity
+// Delete Activity (Creator, Super Admin, or Head Coordinator only)
 app.delete(
   "/api/activities/:id",
   authenticateToken,
   isHeadCoordinatorOrAdmin,
   async (req, res) => {
     try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ error: "Invalid activity ID" });
+      }
+
       const activity = await Activity.findById(req.params.id);
       if (!activity) {
         return res.status(404).json({ error: "Activity not found" });
@@ -1846,19 +2129,31 @@ app.delete(
       }
 
       const user = await User.findById(req.user.id);
-      if (!user.isAdmin && !user.headCoordinatorClubs.includes(club.name)) {
+      if (
+        !user.isAdmin &&
+        !user.headCoordinatorClubs.includes(club.name) &&
+        activity.createdBy.toString() !== req.user.id
+      ) {
         return res.status(403).json({
-          error: "You are not authorized to delete activities for this club",
+          error: "You are not authorized to delete this activity",
         });
       }
 
-      for (const img of activity.images) {
-        if (fs.existsSync(img)) fs.unlinkSync(img);
+      for (const image of activity.images) {
+        try {
+          await fs.access(image);
+          await fs.unlink(image);
+        } catch (err) {
+          console.warn("Failed to delete activity image:", {
+            message: err.message,
+            path: image,
+          });
+        }
       }
 
       await activity.deleteOne();
 
-      const members = await User.find({ clubName: club.name });
+      const members = await User.find({ _id: { $in: club.members } });
       for (const member of members) {
         await Notification.create({
           userId: member._id,
@@ -1869,8 +2164,8 @@ app.delete(
 
       res.json({ message: "Activity deleted successfully" });
     } catch (err) {
-      console.error("Activity deletion error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Activity deletion error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in activity deletion" });
     }
   }
 );
@@ -1878,260 +2173,60 @@ app.delete(
 // Get Notifications
 app.get("/api/notifications", authenticateToken, async (req, res) => {
   try {
-    const notifications = await Notification.find({ userId: req.user.id })
-      .sort({ createdAt: -1 })
-      .limit(50);
+    const notifications = await Notification.find({ userId: req.user.id }).sort({
+      createdAt: -1,
+    });
     res.json(notifications);
   } catch (err) {
-    console.error("Error fetching notifications:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error fetching notifications:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching notifications" });
   }
 });
 
-// Mark Notification as read
-app.patch(
-  "/api/notifications/:id/read",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      const notification = await Notification.findOne({
-        _id: req.params.id,
-        userId: req.user.id,
-      });
-      if (!notification) {
-        return res.status(404).json({ error: "Notification not found" });
-      }
-      notification.read = true;
-      await notification.save();
-      res.json({ message: "Notification marked as read" });
-    } catch (err) {
-      console.error("Error updating notification:", err);
-      res.status(500).json({ error: "Server error" });
-    }
-  }
-);
-
-// Club Contact Form
-app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
-  const { id } = req.params;
-  const { message } = req.body;
-  if (!message) {
-    return res.status(400).json({ error: "Message is required" });
-  }
-
+// Mark Notification as Read
+app.patch("/api/notifications/:id/read", authenticateToken, async (req, res) => {
   try {
-    const club = await Club.findById(id);
-    if (!club) {
-      return res.status(404).json({ error: "Club not found" });
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid notification ID" });
     }
 
-    await transporter.sendMail({
-      from: `"ACEM" <${process.env.EMAIL_USER}>`,
-      to: club.contactEmail || process.env.EMAIL_USER,
-      subject: `Contact Request for ${club.name}`,
-      text: `Message from ${req.user.email}:\n\n${message}`,
-    });
-
-    await Notification.create({
-      userId: req.user.id,
-      message: `Your contact message for ${club.name} has been sent.`,
-      type: "general",
-    });
-
-    res.json({ message: "Message sent successfully" });
-  } catch (err) {
-    console.error("Error sending contact email:", err);
-    res.status(500).json({ error: "Failed to send message" });
-  }
-});
-
-// Global Contact Form
-app.post("/api/contact", authenticateToken, async (req, res) => {
-  const { name, email, message } = req.body;
-  if (!name || !email || !message) {
-    return res
-      .status(400)
-      .json({ error: "Name, email, and message are required" });
-  }
-
-  try {
-    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-      : ["satyam.pandey@acem.edu.in"];
-    if (superAdminEmails.length === 0) {
+    const notification = await Notification.findById(req.params.id);
+    if (!notification) {
+      return res.status(404).json({ error: "Notification not found" });
+    }
+    if (notification.userId.toString() !== req.user.id) {
       return res
-        .status(500)
-        .json({ error: "No super admin emails configured" });
+        .status(403)
+        .json({ error: "Not authorized to modify this notification" });
     }
 
-    await transporter.sendMail({
-      from: `"ACEM" <${process.env.EMAIL_USER}>`,
-      to: superAdminEmails,
-      subject: `Contact Form Submission from ${name}`,
-      text: `Name: ${name}\nEmail: ${email}\nMessage:\n${message}`,
-    });
-
-    await Notification.create({
-      userId: req.user.id,
-      message: "Your contact message has been sent to the administrators.",
-      type: "general",
-    });
-
-    res.json({ message: "Message sent successfully" });
+    notification.read = true;
+    await notification.save();
+    res.json({ message: "Notification marked as read" });
   } catch (err) {
-    console.error("Error sending contact email:", err);
-    res.status(500).json({ error: "Failed to send message" });
+    console.error("Error marking notification as read:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in updating notification" });
   }
 });
 
-// Get Club Contact Details
-app.get("/api/clubs/:clubId/contacts", authenticateToken, async (req, res) => {
-  try {
-    const club = await Club.findById(req.params.clubId);
-    if (!club) {
-      return res.status(404).json({ error: "Club not found" });
-    }
-
-    const defaultContact = {
-      email: "satyam.pandey@acem.edu.in",
-      number: "8851020767",
-      room: "CSE Dept.",
-      timing: "9 to 4",
-    };
-
-    const contactDetails = {
-      email: club.contactEmail || defaultContact.email,
-      number: defaultContact.number,
-      room: defaultContact.room,
-      timing: defaultContact.timing,
-    };
-
-    res.json(contactDetails);
-  } catch (err) {
-    console.error("Error fetching club contact details:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// Add New Student and Join Club
-app.post(
-  "/api/clubs/:clubId/add-student",
-  authenticateToken,
-  isSuperAdminOrAdmin,
-  async (req, res) => {
-    const { clubId } = req.params;
-    const { name, email, rollNo, branch, semester, course, specialization } =
-      req.body;
-    if (
-      !name ||
-      !email ||
-      !rollNo ||
-      !branch ||
-      !semester ||
-      !course ||
-      !specialization
-    ) {
-      return res.status(400).json({ error: "All fields are required" });
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({ error: "Invalid email address" });
-    }
-
-    try {
-      const club = await Club.findById(clubId);
-      if (!club) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-
-      let user = await User.findOne({ $or: [{ email }, { rollNo }] });
-      if (user) {
-        if (user.clubName.includes(club.name)) {
-          return res
-            .status(400)
-            .json({ error: "User is already a member of this club" });
-        }
-        user.clubName.push(club.name);
-        user.isClubMember = true;
-        user.branch = branch;
-        user.semester = semester;
-        user.course = course;
-        user.specialization = specialization;
-        await user.save();
-      } else {
-        const defaultPassword = "default123";
-        user = new User({
-          name,
-          email,
-          password: defaultPassword,
-          rollNo,
-          branch,
-          semester,
-          course,
-          specialization,
-          clubName: [club.name],
-          isClubMember: true,
-        });
-        await user.save();
-
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: email,
-          subject: `Welcome to ${club.name}`,
-          text: `You have been added to ${club.name}. Your account has been created with email: ${email} and default password: ${defaultPassword}. Please log in and change your password.`,
-        });
-      }
-
-      club.memberCount = await User.countDocuments({ clubName: club.name });
-      await club.save();
-
-      await Notification.create({
-        userId: user._id,
-        message: `You have been added to ${club.name}.`,
-        type: "membership",
-      });
-
-      res.status(201).json({
-        message: "Student added successfully",
-        user: {
-          _id: user._id,
-          name: user.name,
-          email: user.email,
-          rollNo: user.rollNo,
-          branch: user.branch,
-          semester: user.semester,
-          course: user.course,
-          specialization: user.specialization,
-        },
-      });
-    } catch (err) {
-      console.error("Error adding student:", {
-        message: err.message,
-        stack: err.stack,
-        clubId,
-        userId: req.user.id,
-      });
-      if (err.code === 11000) {
-        return res
-          .status(400)
-          .json({ error: "Email or roll number already exists" });
-      }
-      res.status(500).json({ error: "Server error" });
-    }
-  }
-);
-
-// Create Attendance Record
+// Create Attendance for Event (Head Coordinator or Admin only)
 app.post(
   "/api/attendance",
   authenticateToken,
-  isSuperAdminOrAdmin,
+  isHeadCoordinatorOrAdmin,
   async (req, res) => {
     const { club, event, date, attendance } = req.body;
-    if (!club || !event || !date || !attendance) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (!club || !event || !date || !Array.isArray(attendance)) {
+      return res
+        .status(400)
+        .json({ error: "Club, event, date, and attendance array are required" });
     }
 
     try {
+      if (!mongoose.isValidObjectId(club) || !mongoose.isValidObjectId(event)) {
+        return res.status(400).json({ error: "Invalid club or event ID" });
+      }
+
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
         return res.status(404).json({ error: "Club not found" });
@@ -2142,233 +2237,142 @@ app.post(
         return res.status(404).json({ error: "Event not found" });
       }
 
-      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct(
-        "_id"
-      );
-      const clubMemberIds = clubMembers.map((id) => id.toString());
-      const attendanceRecords = Object.entries(attendance)
-        .filter(([userId, status]) => status && clubMemberIds.includes(userId))
-        .map(([userId, status]) => ({
-          userId,
-          status,
-        }));
-
-      if (attendanceRecords.length === 0) {
+      if (eventDoc.club.toString() !== club) {
         return res
           .status(400)
-          .json({ error: "No valid attendance records provided" });
+          .json({ error: "Event does not belong to the specified club" });
       }
 
-      const presentCount = attendanceRecords.filter(
-        (record) => record.status === "present"
+      const validAttendance = attendance.filter(
+        (entry) =>
+          mongoose.isValidObjectId(entry.userId) &&
+          ["present", "absent"].includes(entry.status)
+      );
+      if (validAttendance.length === 0) {
+        return res.status(400).json({ error: "No valid attendance entries provided" });
+      }
+
+      const userIds = validAttendance.map((entry) => entry.userId);
+      const users = await User.find({ _id: { $in: userIds } });
+      if (users.length !== userIds.length) {
+        return res
+          .status(400)
+          .json({ error: "One or more user IDs are invalid" });
+      }
+
+      if (!users.every((user) => clubDoc.members.includes(user._id))) {
+        return res
+          .status(400)
+          .json({ error: "One or more users are not members of the club" });
+      }
+
+      const presentCount = validAttendance.filter(
+        (entry) => entry.status === "present"
       ).length;
-      const absentCount = attendanceRecords.filter(
-        (record) => record.status === "absent"
-      ).length;
-      const totalMarked = presentCount + absentCount;
-      const attendanceRate =
-        clubMembers.length > 0
-          ? ((presentCount / clubMembers.length) * 100).toFixed(1)
-          : 0;
+      const absentCount = validAttendance.length - presentCount;
+      const attendanceRate = (presentCount / validAttendance.length) * 100;
 
       const attendanceRecord = new Attendance({
         club,
         event,
         date: new Date(date),
-        attendance: attendanceRecords,
+        attendance: validAttendance,
         stats: {
           presentCount,
           absentCount,
-          totalMarked,
+          totalMarked: validAttendance.length,
           attendanceRate,
         },
         createdBy: req.user.id,
       });
-
       await attendanceRecord.save();
 
-      // Generate DOCX file
-      const presentStudents = await User.find({
-        _id: {
-          $in: attendanceRecords
-            .filter((r) => r.status === "present")
-            .map((r) => r.userId),
-        },
-      })
-        .select("name rollNo branch")
-        .lean();
-
-      const doc = new Document({
-        sections: [
-          {
-            properties: {},
-            children: [
-              new Paragraph({
-                text: `Attendance Report for ${eventDoc.title}`,
-                heading: HeadingLevel.HEADING_1,
-                alignment: "center",
-              }),
-              new Paragraph({
-                text: `Club: ${clubDoc.name}`,
-                heading: HeadingLevel.HEADING_2,
-              }),
-              new Paragraph({
-                text: `Date: ${new Date(date).toLocaleDateString()}`,
-                heading: HeadingLevel.HEADING_2,
-              }),
-              new Paragraph({
-                text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
-                spacing: { after: 200 },
-              }),
-              new Table({
-                rows: [
-                  new TableRow({
-                    children: [
-                      new TableCell({
-                        children: [new Paragraph("Name")],
-                        width: { size: 30, type: WidthType.PERCENTAGE },
-                      }),
-                      new TableCell({
-                        children: [new Paragraph("Roll Number")],
-                        width: { size: 20, type: WidthType.PERCENTAGE },
-                      }),
-                      new TableCell({
-                        children: [new Paragraph("Branch")],
-                        width: { size: 50, type: WidthType.PERCENTAGE },
-                      }),
-                    ],
-                  }),
-                  ...presentStudents.map(
-                    (student) =>
-                      new TableRow({
-                        children: [
-                          new TableCell({
-                            children: [new Paragraph(student.name)],
-                          }),
-                          new TableCell({
-                            children: [new Paragraph(student.rollNo)],
-                          }),
-                          new TableCell({
-                            children: [new Paragraph(student.branch)],
-                          }),
-                        ],
-                      })
-                  ),
-                ],
-                width: { size: 100, type: WidthType.PERCENTAGE },
-              }),
-            ],
-          },
-        ],
-      });
-
-      const buffer = await Packer.toBuffer(doc);
-      const docFileName = `Attendance_${eventDoc.title}_${Date.now()}.docx`;
-      const docFilePath = path.join(__dirname, "Uploads", docFileName);
-      fs.writeFileSync(docFilePath, buffer);
-
-      // Notify present students
-      for (const student of presentStudents) {
+      for (const entry of validAttendance) {
         await Notification.create({
-          userId: student._id,
-          message: `Your attendance has been marked as present for "${
-            eventDoc.title
-          }" on ${new Date(date).toLocaleDateString()}.`,
+          userId: entry.userId,
+          message: `Your attendance for "${eventDoc.title}" on ${date} has been marked as ${entry.status}.`,
           type: "attendance",
         });
       }
 
       res.status(201).json({
         message: "Attendance recorded successfully",
-        attendance: {
-          ...attendanceRecord._doc,
-          docLink: `http://localhost:5000/uploads/${docFileName}`,
-        },
+        attendance: attendanceRecord,
       });
     } catch (err) {
-      console.error("Error creating attendance:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Attendance creation error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in attendance creation" });
     }
   }
 );
 
-// Get Present Students for an Event
-app.get(
-  "/api/attendance/:eventId/present",
-  authenticateToken,
-  isSuperAdminOrAdmin,
-  async (req, res) => {
-    try {
-      const { eventId } = req.params;
-      const attendanceRecord = await Attendance.findOne({ event: eventId })
-        .populate({
-          path: "attendance.userId",
-          select: "name email rollNo branch",
-        })
-        .lean();
+// Get Attendance for Event
+app.get("/api/attendance", authenticateToken, async (req, res) => {
+  try {
+    const { club, event, startDate, endDate } = req.query;
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
-      if (!attendanceRecord) {
-        return res
-          .status(404)
-          .json({ error: "Attendance record not found for this event" });
+    let query = {};
+    if (club) {
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
       }
-
-      const presentStudents = attendanceRecord.attendance
-        .filter((record) => record.status === "present")
-        .map((record) => ({
-          _id: record.userId._id,
-          name: record.userId.name,
-          email: record.userId.email,
-          rollNo: record.userId.rollNo,
-          branch: record.userId.branch,
-        }));
-
-      res.json({
-        eventId,
-        presentStudents,
-        totalPresent: presentStudents.length,
-      });
-    } catch (err) {
-      console.error("Error fetching present students:", err);
-      res.status(500).json({ error: "Server error" });
+      query.club = club;
     }
-  }
-);
-
-// Get Attendance Records
-app.get(
-  "/api/attendance",
-  authenticateToken,
-  isSuperAdminOrAdmin,
-  async (req, res) => {
-    try {
-      const { club, event } = req.query;
-      const query = {};
-      if (club) query.club = club;
-      if (event) query.event = event;
-
-      const attendanceRecords = await Attendance.find(query)
-        .populate("club", "name")
-        .populate("event", "title")
-        .populate("createdBy", "name email");
-      res.json(attendanceRecords);
-    } catch (err) {
-      console.error("Error fetching attendance records:", err);
-      res.status(500).json({ error: "Server error" });
+    if (event) {
+      if (!mongoose.isValidObjectId(event)) {
+        return res.status(400).json({ error: "Invalid event ID" });
+      }
+      query.event = event;
     }
-  }
-);
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
 
-// Update Attendance Record
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (!superAdminEmails.includes(user.email)) {
+      const clubs = await Club.find({
+        $or: [
+          { creator: user._id },
+          { superAdmins: user._id },
+          { name: { $in: user.headCoordinatorClubs } },
+        ],
+      }).distinct("_id");
+      query.club = { $in: clubs };
+    }
+
+    const attendanceRecords = await Attendance.find(query)
+      .populate("club", "name")
+      .populate("event", "title")
+      .populate("attendance.userId", "name email rollNo");
+    res.json(attendanceRecords);
+  } catch (err) {
+    console.error("Error fetching attendance:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching attendance" });
+  }
+});
+
+// Update Attendance for Event (Head Coordinator or Admin only)
 app.put(
   "/api/attendance/:id",
   authenticateToken,
-  isSuperAdminOrAdmin,
+  isHeadCoordinatorOrAdmin,
   async (req, res) => {
     const { id } = req.params;
     const { attendance } = req.body;
-    if (!attendance) {
-      return res.status(400).json({ error: "Attendance data is required" });
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid attendance ID" });
+    }
+    if (!Array.isArray(attendance)) {
+      return res.status(400).json({ error: "Attendance array is required" });
     }
 
     try {
@@ -2377,181 +2381,660 @@ app.put(
         return res.status(404).json({ error: "Attendance record not found" });
       }
 
-      const clubDoc = await Club.findById(attendanceRecord.club);
-      if (!clubDoc) {
+      const club = await Club.findById(attendanceRecord.club);
+      if (!club) {
         return res.status(404).json({ error: "Club not found" });
       }
 
-      const eventDoc = await Event.findById(attendanceRecord.event);
-      if (!eventDoc) {
+      const event = await Event.findById(attendanceRecord.event);
+      if (!event) {
         return res.status(404).json({ error: "Event not found" });
       }
 
-      const clubMembers = await User.find({ clubName: clubDoc.name }).distinct(
-        "_id"
+      const validAttendance = attendance.filter(
+        (entry) =>
+          mongoose.isValidObjectId(entry.userId) &&
+          ["present", "absent"].includes(entry.status)
       );
-      const clubMemberIds = clubMembers.map((id) => id.toString());
-      const updatedAttendance = Object.entries(attendance)
-        .filter(([userId, status]) => status && clubMemberIds.includes(userId))
-        .map(([userId, status]) => ({
-          userId,
-          status,
-        }));
-
-      if (updatedAttendance.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "No valid attendance records provided" });
+      if (validAttendance.length === 0) {
+        return res.status(400).json({ error: "No valid attendance entries provided" });
       }
 
-      const presentCount = updatedAttendance.filter(
-        (record) => record.status === "present"
-      ).length;
-      const absentCount = updatedAttendance.filter(
-        (record) => record.status === "absent"
-      ).length;
-      const totalMarked = presentCount + absentCount;
-      const attendanceRate =
-        clubMembers.length > 0
-          ? ((presentCount / clubMembers.length) * 100).toFixed(1)
-          : 0;
+      const userIds = validAttendance.map((entry) => entry.userId);
+      const users = await User.find({ _id: { $in: userIds } });
+      if (users.length !== userIds.length) {
+        return res
+          .status(400)
+          .json({ error: "One or more user IDs are invalid" });
+      }
 
-      attendanceRecord.attendance = updatedAttendance;
+      if (!users.every((user) => club.members.includes(user._id))) {
+        return res
+          .status(400)
+          .json({ error: "One or more users are not members of the club" });
+      }
+
+      const presentCount = validAttendance.filter(
+        (entry) => entry.status === "present"
+      ).length;
+      const absentCount = validAttendance.length - presentCount;
+      const attendanceRate = (presentCount / validAttendance.length) * 100;
+
+      attendanceRecord.attendance = validAttendance;
       attendanceRecord.stats = {
         presentCount,
         absentCount,
-        totalMarked,
+        totalMarked: validAttendance.length,
         attendanceRate,
       };
       await attendanceRecord.save();
 
-      // Generate updated DOCX file
-      const presentStudents = await User.find({
-        _id: {
-          $in: updatedAttendance
-            .filter((r) => r.status === "present")
-            .map((r) => r.userId),
-        },
-      })
-        .select("name rollNo branch")
-        .lean();
-
-      const doc = new Document({
-        sections: [
-          {
-            properties: {},
-            children: [
-              new Paragraph({
-                text: `Attendance Report for ${eventDoc.title}`,
-                heading: HeadingLevel.HEADING_1,
-                alignment: "center",
-              }),
-              new Paragraph({
-                text: `Club: ${clubDoc.name}`,
-                heading: HeadingLevel.HEADING_2,
-              }),
-              new Paragraph({
-                text: `Date: ${new Date(
-                  attendanceRecord.date
-                ).toLocaleDateString()}`,
-                heading: HeadingLevel.HEADING_2,
-              }),
-              new Paragraph({
-                text: `Total Present: ${presentCount} | Total Absent: ${absentCount} | Attendance Rate: ${attendanceRate}%`,
-                spacing: { after: 200 },
-              }),
-              new Table({
-                rows: [
-                  new TableRow({
-                    children: [
-                      new TableCell({
-                        children: [new Paragraph("Name")],
-                        width: { size: 30, type: WidthType.PERCENTAGE },
-                      }),
-                      new TableCell({
-                        children: [new Paragraph("Roll Number")],
-                        width: { size: 20, type: WidthType.PERCENTAGE },
-                      }),
-                      new TableCell({
-                        children: [new Paragraph("Branch")],
-                        width: { size: 50, type: WidthType.PERCENTAGE },
-                      }),
-                    ],
-                  }),
-                  ...presentStudents.map(
-                    (student) =>
-                      new TableRow({
-                        children: [
-                          new TableCell({
-                            children: [new Paragraph(student.name)],
-                          }),
-                          new TableCell({
-                            children: [new Paragraph(student.rollNo)],
-                          }),
-                          new TableCell({
-                            children: [new Paragraph(student.branch)],
-                          }),
-                        ],
-                      })
-                  ),
-                ],
-                width: { size: 100, type: WidthType.PERCENTAGE },
-              }),
-            ],
-          },
-        ],
-      });
-
-      const buffer = await Packer.toBuffer(doc);
-      const docFileName = `Attendance_${eventDoc.title}_${Date.now()}.docx`;
-      const docFilePath = path.join(__dirname, "Uploads", docFileName);
-      fs.writeFileSync(docFilePath, buffer);
-
-      // Notify updated present students
-      for (const student of presentStudents) {
+      for (const entry of validAttendance) {
         await Notification.create({
-          userId: student._id,
-          message: `Your attendance has been updated as present for "${
-            eventDoc.title
-          }" on ${new Date(attendanceRecord.date).toLocaleDateString()}.`,
+          userId: entry.userId,
+          message: `Your attendance for "${event.title}" on ${attendanceRecord.date.toISOString().split('T')[0]} has been updated to ${entry.status}.`,
           type: "attendance",
         });
       }
 
       res.json({
         message: "Attendance updated successfully",
-        attendance: {
-          ...attendanceRecord._doc,
-          docLink: `http://localhost:5000/uploads/${docFileName}`,
-        },
+        attendance: attendanceRecord,
       });
     } catch (err) {
-      console.error("Error updating attendance:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Attendance update error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in attendance update" });
     }
   }
 );
 
-// Delete Attendance Record
-app.delete(
-  "/api/attendance/:id",
+// Get User Attendance History
+app.get("/api/attendance/user", authenticateToken, async (req, res) => {
+  try {
+    const { club, startDate, endDate } = req.query;
+    let query = { "attendance.userId": req.user.id };
+
+    if (club) {
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+      query.club = club;
+    }
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
+
+    const attendanceRecords = await Attendance.find(query)
+      .populate("club", "name")
+      .populate("event", "title")
+      .select("event date attendance stats");
+
+    const userAttendance = attendanceRecords.map((record) => {
+      const userEntry = record.attendance.find(
+        (entry) => entry.userId.toString() === req.user.id
+      );
+      return {
+        event: record.event,
+        club: record.club,
+        date: record.date,
+        status: userEntry ? userEntry.status : "unknown",
+        stats: record.stats,
+      };
+    });
+
+    res.json(userAttendance);
+  } catch (err) {
+    console.error("Error fetching user attendance:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching user attendance" });
+  }
+});
+
+// Create Practice Attendance (Head Coordinator or Admin only)
+app.post(
+  "/api/practice-attendance",
   authenticateToken,
-  isSuperAdminOrAdmin,
+  isHeadCoordinatorOrAdmin,
   async (req, res) => {
+    const { club, title, date, roomNo, attendance } = req.body;
+    if (!club || !title || !date || !roomNo || !Array.isArray(attendance)) {
+      return res
+        .status(400)
+        .json({ error: "Club, title, date, room number, and attendance array are required" });
+    }
+
     try {
-      const attendanceRecord = await Attendance.findById(req.params.id);
-      if (!attendanceRecord) {
-        return res.status(404).json({ error: "Attendance record not found" });
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
       }
 
-      await attendanceRecord.deleteOne();
-      res.json({ message: "Attendance record deleted successfully" });
+      const clubDoc = await Club.findById(club);
+      if (!clubDoc) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      const validAttendance = attendance.filter(
+        (entry) =>
+          mongoose.isValidObjectId(entry.userId) &&
+          ["present", "absent"].includes(entry.status)
+      );
+      if (validAttendance.length === 0) {
+        return res.status(400).json({ error: "No valid attendance entries provided" });
+      }
+
+      const userIds = validAttendance.map((entry) => entry.userId);
+      const users = await User.find({ _id: { $in: userIds } });
+      if (users.length !== userIds.length) {
+        return res
+          .status(400)
+          .json({ error: "One or more user IDs are invalid" });
+      }
+
+      if (!users.every((user) => clubDoc.members.includes(user._id))) {
+        return res
+          .status(400)
+          .json({ error: "One or more users are not members of the club" });
+      }
+
+      const presentCount = validAttendance.filter(
+        (entry) => entry.status === "present"
+      ).length;
+      const absentCount = validAttendance.length - presentCount;
+      const attendanceRate = (presentCount / validAttendance.length) * 100;
+
+      const practiceAttendance = new PracticeAttendance({
+        club,
+        title,
+        date,
+        roomNo,
+        attendance: validAttendance,
+        stats: {
+          presentCount,
+          absentCount,
+          totalMarked: validAttendance.length,
+          attendanceRate,
+        },
+        createdBy: req.user.id,
+      });
+      await practiceAttendance.save();
+
+      for (const entry of validAttendance) {
+        await Notification.create({
+          userId: entry.userId,
+          message: `Your attendance for "${title}" on ${date} in room ${roomNo} has been marked as ${entry.status}.`,
+          type: "attendance",
+        });
+      }
+
+      res.status(201).json({
+        message: "Practice attendance recorded successfully",
+        attendance: practiceAttendance,
+      });
     } catch (err) {
-      console.error("Error deleting attendance:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Practice attendance creation error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in practice attendance creation" });
     }
   }
 );
+
+// Get Practice Attendance
+app.get("/api/practice-attendance", authenticateToken, async (req, res) => {
+  try {
+    const { club, startDate, endDate } = req.query;
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    let query = {};
+    if (club) {
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+      query.club = club;
+    }
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
+
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (!superAdminEmails.includes(user.email)) {
+      const clubs = await Club.find({
+        $or: [
+          { creator: user._id },
+          { superAdmins: user._id },
+          { name: { $in: user.headCoordinatorClubs } },
+        ],
+      }).distinct("_id");
+      query.club = { $in: clubs };
+    }
+
+    const practiceAttendanceRecords = await PracticeAttendance.find(query)
+      .populate("club", "name")
+      .populate("attendance.userId", "name email rollNo");
+    res.json(practiceAttendanceRecords);
+  } catch (err) {
+    console.error("Error fetching practice attendance:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching practice attendance" });
+  }
+});
+
+// Update Practice Attendance (Head Coordinator or Admin only)
+app.put(
+  "/api/practice-attendance/:id",
+  authenticateToken,
+  isHeadCoordinatorOrAdmin,
+  async (req, res) => {
+    const { id } = req.params;
+    const { title, date, roomNo, attendance } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid attendance ID" });
+    }
+    if (!title || !date || !roomNo || !Array.isArray(attendance)) {
+      return res
+        .status(400)
+        .json({ error: "Title, date, room number, and attendance array are required" });
+    }
+
+    try {
+      const practiceAttendance = await PracticeAttendance.findById(id);
+      if (!practiceAttendance) {
+        return res.status(404).json({ error: "Practice attendance record not found" });
+      }
+
+      const club = await Club.findById(practiceAttendance.club);
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      const validAttendance = attendance.filter(
+        (entry) =>
+          mongoose.isValidObjectId(entry.userId) &&
+          ["present", "absent"].includes(entry.status)
+      );
+      if (validAttendance.length === 0) {
+        return res.status(400).json({ error: "No valid attendance entries provided" });
+      }
+
+      const userIds = validAttendance.map((entry) => entry.userId);
+      const users = await User.find({ _id: { $in: userIds } });
+      if (users.length !== userIds.length) {
+        return res
+          .status(400)
+          .json({ error: "One or more user IDs are invalid" });
+      }
+
+      if (!users.every((user) => club.members.includes(user._id))) {
+        return res
+          .status(400)
+          .json({ error: "One or more users are not members of the club" });
+      }
+
+      const presentCount = validAttendance.filter(
+        (entry) => entry.status === "present"
+      ).length;
+      const absentCount = validAttendance.length - presentCount;
+      const attendanceRate = (presentCount / validAttendance.length) * 100;
+
+      practiceAttendance.title = title;
+      practiceAttendance.date = date;
+      practiceAttendance.roomNo = roomNo;
+      practiceAttendance.attendance = validAttendance;
+      practiceAttendance.stats = {
+        presentCount,
+        absentCount,
+        totalMarked: validAttendance.length,
+        attendanceRate,
+      };
+      await practiceAttendance.save();
+
+      for (const entry of validAttendance) {
+        await Notification.create({
+          userId: entry.userId,
+          message: `Your attendance for "${title}" on ${date} in room ${roomNo} has been updated to ${entry.status}.`,
+          type: "attendance",
+        });
+      }
+
+      res.json({
+        message: "Practice attendance updated successfully",
+        attendance: practiceAttendance,
+      });
+    } catch (err) {
+      console.error("Practice attendance update error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in practice attendance update" });
+    }
+  }
+);
+
+// Delete Practice Attendance (Head Coordinator or Admin only)
+app.delete(
+  "/api/practice-attendance/:id",
+  authenticateToken,
+  isHeadCoordinatorOrAdmin,
+  async (req, res) => {
+    try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ error: "Invalid attendance ID" });
+      }
+
+      const practiceAttendance = await PracticeAttendance.findById(req.params.id);
+      if (!practiceAttendance) {
+        return res.status(404).json({ error: "Practice attendance record not found" });
+      }
+
+      const club = await Club.findById(practiceAttendance.club);
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      await practiceAttendance.deleteOne();
+
+      const members = await User.find({ _id: { $in: club.members } });
+      for (const member of members) {
+        await Notification.create({
+          userId: member._id,
+          message: `Practice attendance record "${practiceAttendance.title}" for ${club.name} on ${practiceAttendance.date} has been deleted.`,
+          type: "attendance",
+        });
+      }
+
+      res.json({ message: "Practice attendance deleted successfully" });
+    } catch (err) {
+      console.error("Practice attendance deletion error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in practice attendance deletion" });
+    }
+  }
+);
+
+// Get User Practice Attendance History
+app.get("/api/practice-attendance/user", authenticateToken, async (req, res) => {
+  try {
+    const { club, startDate, endDate } = req.query;
+    let query = { "attendance.userId": req.user.id };
+
+    if (club) {
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+      query.club = club;
+    }
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
+
+    const practiceAttendanceRecords = await PracticeAttendance.find(query)
+      .populate("club", "name")
+      .select("title date roomNo attendance stats");
+
+    const userAttendance = practiceAttendanceRecords.map((record) => {
+      const userEntry = record.attendance.find(
+        (entry) => entry.userId.toString() === req.user.id
+      );
+      return {
+        title: record.title,
+        club: record.club,
+        date: record.date,
+        roomNo: record.roomNo,
+        status: userEntry ? userEntry.status : "unknown",
+        stats: record.stats,
+      };
+    });
+
+    res.json(userAttendance);
+  } catch (err) {
+    console.error("Error fetching user practice attendance:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in fetching user practice attendance" });
+  }
+});
+
+// Generate Attendance Report (Head Coordinator or Admin only)
+app.get(
+  "/api/attendance/report",
+  authenticateToken,
+  isHeadCoordinatorOrAdmin,
+  async (req, res) => {
+    const { club, startDate, endDate } = req.query;
+    if (!club) {
+      return res.status(400).json({ error: "Club ID is required" });
+    }
+    if (!mongoose.isValidObjectId(club)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+
+    try {
+      const clubDoc = await Club.findById(club);
+      if (!clubDoc) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      let query = { club };
+      if (startDate || endDate) {
+        query.date = {};
+        if (startDate) query.date.$gte = new Date(startDate);
+        if (endDate) query.date.$lte = new Date(endDate);
+      }
+
+      const eventAttendance = await Attendance.find(query)
+        .populate("event", "title")
+        .populate("attendance.userId", "name email rollNo");
+      const practiceAttendance = await PracticeAttendance.find(query)
+        .populate("attendance.userId", "name email rollNo");
+
+      // Create DOCX document
+      const doc = new Document({
+        sections: [
+          {
+            properties: {},
+            children: [
+              new Paragraph({
+                text: `Attendance Report for ${clubDoc.name}`,
+                heading: HeadingLevel.HEADING_1,
+                alignment: "center",
+              }),
+              new Paragraph({
+                text: `Generated on: ${new Date().toLocaleDateString()}`,
+                spacing: { after: 200 },
+              }),
+              ...(startDate || endDate
+                ? [
+                  new Paragraph({
+                    text: `Date Range: ${startDate || "N/A"} to ${endDate || "N/A"}`,
+                    spacing: { after: 200 },
+                  }),
+                ]
+                : []),
+              new Paragraph({
+                text: "Event Attendance",
+                heading: HeadingLevel.HEADING_2,
+                spacing: { before: 400, after: 200 },
+              }),
+              ...eventAttendance.flatMap((record) => [
+                new Paragraph({
+                  text: `Event: ${record.event.title} | Date: ${record.date.toLocaleDateString()}`,
+                  heading: HeadingLevel.HEADING_3,
+                }),
+                new Table({
+                  width: { size: 100, type: WidthType.PERCENTAGE },
+                  rows: [
+                    new TableRow({
+                      children: [
+                        new TableCell({
+                          children: [new Paragraph("Name")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Email")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Roll No")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Status")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                      ],
+                    }),
+                    ...record.attendance.map(
+                      (entry) =>
+                        new TableRow({
+                          children: [
+                            new TableCell({
+                              children: [
+                                new Paragraph(entry.userId.name || "N/A"),
+                              ],
+                            }),
+                            new TableCell({
+                              children: [
+                                new Paragraph(entry.userId.email || "N/A"),
+                              ],
+                            }),
+                            new TableCell({
+                              children: [
+                                new Paragraph(entry.userId.rollNo || "N/A"),
+                              ],
+                            }),
+                            new TableCell({
+                              children: [new Paragraph(entry.status)],
+                            }),
+                          ],
+                        })
+                    ),
+                  ],
+                }),
+                new Paragraph({
+                  text: `Stats: Present: ${record.stats.presentCount}, Absent: ${record.stats.absentCount}, Rate: ${record.stats.attendanceRate.toFixed(2)}%`,
+                  spacing: { after: 200 },
+                }),
+              ]),
+              new Paragraph({
+                text: "Practice Attendance",
+                heading: HeadingLevel.HEADING_2,
+                spacing: { before: 400, after: 200 },
+              }),
+              ...practiceAttendance.flatMap((record) => [
+                new Paragraph({
+                  text: `Practice: ${record.title} | Date: ${record.date} | Room: ${record.roomNo}`,
+                  heading: HeadingLevel.HEADING_3,
+                }),
+                new Table({
+                  width: { size: 100, type: WidthType.PERCENTAGE },
+                  rows: [
+                    new TableRow({
+                      children: [
+                        new TableCell({
+                          children: [new Paragraph("Name")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Email")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Roll No")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Status")],
+                          width: { size: 25, type: WidthType.PERCENTAGE },
+                        }),
+                      ],
+                    }),
+                    ...record.attendance.map(
+                      (entry) =>
+                        new TableRow({
+                          children: [
+                            new TableCell({
+                              children: [
+                                new Paragraph(entry.userId.name || "N/A"),
+                              ],
+                            }),
+                            new TableCell({
+                              children: [
+                                new Paragraph(entry.userId.email || "N/A"),
+                              ],
+                            }),
+                            new TableCell({
+                              children: [
+                                new Paragraph(entry.userId.rollNo || "N/A"),
+                              ],
+                            }),
+                            new TableCell({
+                              children: [new Paragraph(entry.status)],
+                            }),
+                          ],
+                        })
+                    ),
+                  ],
+                }),
+                new Paragraph({
+                  text: `Stats: Present: ${record.stats.presentCount}, Absent: ${record.stats.absentCount}, Rate: ${record.stats.attendanceRate.toFixed(2)}%`,
+                  spacing: { after: 200 },
+                }),
+              ]),
+            ],
+          },
+        ],
+      });
+
+      const buffer = await Packer.toBuffer(doc);
+      const fileName = `Attendance_Report_${clubDoc.name}_${Date.now()}.docx`;
+      const filePath = path.join(__dirname, "Uploads", fileName);
+      await fs.writeFile(filePath, buffer);
+
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${fileName}"`
+      );
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      );
+      res.sendFile(filePath, async (err) => {
+        if (err) {
+          console.error("Error sending report:", { message: err.message, stack: err.stack });
+          return res.status(500).json({ error: "Error sending report" });
+        }
+        try {
+          await fs.unlink(filePath);
+        } catch (unlinkErr) {
+          console.warn("Failed to delete report file:", {
+            message: unlinkErr.message,
+            path: filePath,
+          });
+        }
+      });
+    } catch (err) {
+      console.error("Report generation error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: "Server error in report generation" });
+    }
+  }
+);
+
+// Error Handling Middleware
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `File upload error: ${err.message}` });
+  }
+  console.error("Unexpected error:", {
+    message: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+    userId: req.user?.id,
+  });
+  res.status(500).json({ error: "Internal server error" });
+});
 
 // Start Server
 const PORT = process.env.PORT || 5000;
