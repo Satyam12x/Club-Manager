@@ -1226,6 +1226,11 @@ app.post(
         }
       }
 
+      const creator = await User.findById(req.user.id);
+      if (!creator) {
+        return res.status(404).json({ error: "Creator not found" });
+      }
+
       const club = new Club({
         name,
         icon: iconUrl,
@@ -1235,17 +1240,30 @@ app.post(
         contactEmail,
         headCoordinators: validHeadCoordinators,
         superAdmins: validSuperAdmins,
-        creator: req.user.id, // Set the creator to the authenticated user's ID
-        memberCount: 0,
+        creator: req.user.id,
+        memberCount: 1, // Initialize with 1 to account for the creator
         eventsCount: 0,
-        members: [],
+        members: [req.user.id], // Add creator to members array
       });
       await club.save();
+
+      // Update creator's User document
+      creator.clubName = [...new Set([...creator.clubName, name])];
+      creator.clubs = [...new Set([...creator.clubs, club._id])];
+      creator.isClubMember = true;
+      await creator.save();
+
+      // Send notification to creator
+      await Notification.create({
+        userId: creator._id,
+        message: `You have successfully created and joined ${name} as a member.`,
+        type: "membership",
+      });
 
       const populatedClub = await Club.findById(club._id)
         .populate("superAdmins", "name email")
         .populate("members", "name email")
-        .populate("creator", "name email"); // Ensure creator is populated
+        .populate("creator", "name email");
       const transformedClub = {
         ...populatedClub._doc,
         icon: populatedClub.icon || null,
@@ -1448,6 +1466,8 @@ app.delete(
       }
 
       const members = await User.find({ _id: { $in: club.members } });
+
+      // Remove club references from users
       await User.updateMany(
         {
           $or: [
@@ -1462,11 +1482,15 @@ app.delete(
             pendingClubs: club.name,
             clubs: club._id,
           },
-          $set: {
-            isClubMember: { $cond: [{ $eq: ["$clubName", []] }, false, true] },
-          },
         }
       );
+
+      // Update isClubMember for each affected user
+      for (const member of members) {
+        const updatedUser = await User.findById(member._id);
+        updatedUser.isClubMember = updatedUser.clubName.length > 0;
+        await updatedUser.save();
+      }
 
       await MembershipRequest.deleteMany({ clubName: club.name });
       await Event.deleteMany({ club: club._id });
@@ -1475,8 +1499,8 @@ app.delete(
 
       if (club.icon) {
         try {
-          await fs.access(club.icon);
-          await fs.unlink(club.icon);
+          const publicId = club.icon.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
         } catch (err) {
           console.warn("Failed to delete club icon:", {
             message: err.message,
@@ -1486,8 +1510,8 @@ app.delete(
       }
       if (club.banner) {
         try {
-          await fs.access(club.banner);
-          await fs.unlink(club.banner);
+          const publicId = club.banner.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
         } catch (err) {
           console.warn("Failed to delete club banner:", {
             message: err.message,
