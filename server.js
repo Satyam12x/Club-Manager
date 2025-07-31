@@ -123,7 +123,11 @@ const clubSchema = new mongoose.Schema({
   members: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", default: [] }],
   memberCount: { type: Number, default: 0 },
   eventsCount: { type: Number, default: 0 },
-  creator: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  creator: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
 });
 
 const Club = mongoose.model("Club", clubSchema);
