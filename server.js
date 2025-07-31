@@ -8,6 +8,8 @@ const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs").promises;
+const { v2: cloudinary } = require("cloudinary");
+const streamifier = require("streamifier");
 const {
   Document,
   Packer,
@@ -27,27 +29,22 @@ const app = express();
 // Middlewares
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
-
-// Multer configuration
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "Uploads/");
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, `${uniqueSuffix}-${file.originalname}`);
-  },
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+// Multer configuration
+const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const filetypes = /jpeg|jpg|png/;
-    const extname = filetypes.test(
-      path.extname(file.originalname).toLowerCase()
-    );
     const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(
+      file.originalname.toLowerCase().split(".").pop()
+    );
     if (extname && mimetype) {
       return cb(null, true);
     }
@@ -55,6 +52,24 @@ const upload = multer({
   },
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
+
+// Function to upload file to Cloudinary
+const uploadToCloudinary = (buffer, folder = "ACEM") => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        allowed_formats: ["jpeg", "jpg", "png"],
+        public_id: `file-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      }
+    );
+    streamifier.createReadStream(buffer).pipe(stream);
+  });
+};
 
 // MongoDB Connection
 mongoose
@@ -241,7 +256,6 @@ const attendanceSchema = new mongoose.Schema({
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
 
-
 const practiceAttendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   title: { type: String, required: true },
@@ -279,7 +293,6 @@ const PracticeAttendance = mongoose.model(
   "PracticeAttendance",
   practiceAttendanceSchema
 );
-
 
 const isValidDate = (dateString) => {
   return !isNaN(new Date(dateString).getTime());
@@ -408,11 +421,9 @@ const isSuperAdmin = async (req, res, next) => {
           isCreator: club.creator?.toString() === user._id.toString(),
         }
       );
-      return res
-        .status(403)
-        .json({
-          error: "You are not authorized to perform this action on this club",
-        });
+      return res.status(403).json({
+        error: "You are not authorized to perform this action on this club",
+      });
     }
     next();
   } catch (err) {
@@ -975,7 +986,7 @@ app.post(
       headCoordinators,
       superAdmins,
     } = req.body;
-    if (!name || !description || !category || !req.files?.icon) {
+    if (!name || !description || !category || !req.files.icon) {
       return res
         .status(400)
         .json({ error: "Name, description, category, and icon are required" });
@@ -997,6 +1008,14 @@ app.post(
     }
 
     try {
+      let iconUrl, bannerUrl;
+      if (req.files.icon) {
+        iconUrl = await uploadToCloudinary(req.files.icon[0].buffer);
+      }
+      if (req.files.banner) {
+        bannerUrl = await uploadToCloudinary(req.files.banner[0].buffer);
+      }
+
       let validHeadCoordinators = [];
       if (headCoordinators) {
         const emails = headCoordinators
@@ -1039,75 +1058,38 @@ app.post(
         }
       }
 
-      const user = await User.findById(req.user.id);
-      if (!user) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
       const club = new Club({
         name,
-        icon: req.files.icon[0].path,
-        banner: req.files.banner ? req.files.banner[0].path : null,
+        icon: iconUrl,
+        banner: bannerUrl || null,
         description,
         category,
         contactEmail,
         headCoordinators: validHeadCoordinators,
         superAdmins: validSuperAdmins,
-        members: [req.user.id],
-        memberCount: 1,
+        memberCount: 0,
         eventsCount: 0,
-        creator: req.user.id,
+        members: [],
       });
       await club.save();
 
-      user.clubs.push(club._id);
-      user.clubName.push(club.name);
-      user.isClubMember = true;
-      await user.save();
-
-      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-        : [];
-      if (superAdminEmails.length > 0) {
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: superAdminEmails,
-          subject: `New Club Created: ${name}`,
-          text: `A new club "${name}" has been created by ${req.user.email}, who has joined as a member.`,
-        });
-      }
-
-      await Notification.create({
-        userId: req.user.id,
-        message: `You have successfully created and joined ${name}.`,
-        type: "membership",
-      });
-
       const populatedClub = await Club.findById(club._id)
         .populate("superAdmins", "name email")
-        .populate("members", "name email")
-        .populate("creator", "name email");
+        .populate("members", "name email");
       const transformedClub = {
         ...populatedClub._doc,
-        icon: populatedClub.icon
-          ? `http://localhost:5000/${populatedClub.icon}`
-          : null,
-        banner: populatedClub.banner
-          ? `http://localhost:5000/${populatedClub.banner}`
-          : null,
+        icon: populatedClub.icon || null,
+        banner: populatedClub.banner || null,
       };
       res
         .status(201)
         .json({ message: "Club created successfully", club: transformedClub });
     } catch (err) {
-      console.error("Club creation error:", {
-        message: err.message,
-        stack: err.stack,
-      });
+      console.error("Club creation error:", err);
       if (err.code === 11000) {
         return res.status(400).json({ error: "Club name already exists" });
       }
-      res.status(500).json({ error: "Server error in club creation" });
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
@@ -1131,10 +1113,6 @@ app.patch(
       superAdmins,
     } = req.body;
 
-    if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ error: "Invalid club ID" });
-    }
-
     if (req.body.name) {
       return res.status(400).json({ error: "Club name cannot be updated" });
     }
@@ -1153,34 +1131,37 @@ app.patch(
       if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
         return res.status(400).json({ error: "Invalid contact email" });
       }
-      if (
-        category &&
-        !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-          category
-        )
-      ) {
-        return res.status(400).json({ error: "Invalid category" });
+
+      let iconUrl = club.icon;
+      let bannerUrl = club.banner;
+
+      if (req.files.icon) {
+        if (club.icon) {
+          const publicId = club.icon.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
+        }
+        iconUrl = await uploadToCloudinary(req.files.icon[0].buffer);
+      }
+      if (req.files.banner) {
+        if (club.banner) {
+          const publicId = club.banner.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
+        }
+        bannerUrl = await uploadToCloudinary(req.files.banner[0].buffer);
       }
 
       let validHeadCoordinators = club.headCoordinators;
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-            .split(",")
-            .map((email) => email.trim())
-            .filter((email) => email)
+              .split(",")
+              .map((email) => email.trim())
+              .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
           emailRegex.test(email)
         );
-        if (emails.length > 0 && validHeadCoordinators.length === 0) {
-          return res
-            .status(400)
-            .json({
-              error: "All provided head coordinator emails are invalid",
-            });
-        }
         await User.updateMany(
           { email: { $in: validHeadCoordinators } },
           {
@@ -1195,12 +1176,25 @@ app.patch(
           },
           {
             $pull: { headCoordinatorClubs: club.name },
-            $set: {
-              isHeadCoordinator: {
-                $cond: [{ $eq: ["$headCoordinatorClubs", []] }, false, true],
+          }
+        );
+        await User.updateMany(
+          {
+            email: { $in: club.headCoordinators },
+          },
+          [
+            {
+              $set: {
+                isHeadCoordinator: {
+                  $cond: {
+                    if: { $eq: ["$headCoordinatorClubs", []] },
+                    then: false,
+                    else: true,
+                  },
+                },
               },
             },
-          }
+          ]
         );
       }
 
@@ -1208,132 +1202,57 @@ app.patch(
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
           ? superAdmins
-            .split(",")
-            .map((id) => id.trim())
-            .filter((id) => id)
+              .split(",")
+              .map((id) => id.trim())
+              .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
             .status(400)
             .json({ error: "A club can have at most 2 super admins" });
         }
-        if (adminIds.length > 0) {
-          if (!adminIds.every((id) => mongoose.isValidObjectId(id))) {
-            return res
-              .status(400)
-              .json({ error: "Invalid super admin ID format" });
-          }
-          const users = await User.find({ _id: { $in: adminIds } });
-          validSuperAdmins = users.map((user) => user._id);
-          if (validSuperAdmins.length !== adminIds.length) {
-            return res
-              .status(400)
-              .json({ error: "One or more super admin IDs are invalid" });
-          }
-        } else {
-          validSuperAdmins = [];
+        const users = await User.find({ _id: { $in: adminIds } });
+        validSuperAdmins = users.map((user) => user._id);
+        if (validSuperAdmins.length !== adminIds.length) {
+          return res
+            .status(400)
+            .json({ error: "One or more super admin IDs are invalid" });
         }
       }
 
-      if (req.files?.icon) {
-        if (club.icon) {
-          try {
-            await fs.access(club.icon);
-            await fs.unlink(club.icon);
-          } catch (err) {
-            console.warn("Failed to delete old icon:", {
-              message: err.message,
-              path: club.icon,
-            });
-          }
+      club.icon = iconUrl;
+      club.banner = bannerUrl;
+      if (description) club.description = description;
+      if (category) {
+        if (
+          !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
+            category
+          )
+        ) {
+          return res.status(400).json({ error: "Invalid category" });
         }
-        club.icon = req.files.icon[0].path;
+        club.category = category;
       }
-      if (req.files?.banner) {
-        if (club.banner) {
-          try {
-            await fs.access(club.banner);
-            await fs.unlink(club.banner);
-          } catch (err) {
-            console.warn("Failed to delete old banner:", {
-              message: err.message,
-              path: club.banner,
-            });
-          }
-        }
-        club.banner = req.files.banner[0].path;
-      }
-      if (description !== undefined) club.description = description;
-      if (category) club.category = category;
-      if (contactEmail !== undefined) club.contactEmail = contactEmail || null;
+      if (contactEmail !== undefined) club.contactEmail = contactEmail;
       club.headCoordinators = validHeadCoordinators;
       club.superAdmins = validSuperAdmins;
 
-      club.memberCount = club.members.length;
-      try {
-        club.eventsCount = await Event.countDocuments({ club: club._id });
-      } catch (err) {
-        console.error("Error counting events:", {
-          message: err.message,
-          stack: err.stack,
-        });
-        club.eventsCount = 0;
-      }
+      club.memberCount = await User.countDocuments({ clubName: club.name });
+      club.eventsCount = await Event.countDocuments({ club: club._id });
 
       await club.save();
 
-      const members = await User.find({ _id: { $in: club.members } });
-      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-        : [];
-      const recipients = [...members.map((m) => m.email), ...superAdminEmails];
-      if (recipients.length > 0) {
-        try {
-          await transporter.sendMail({
-            from: `"ACEM" <${process.env.EMAIL_USER}>`,
-            to: recipients,
-            subject: `Club Updated: ${club.name}`,
-            text: `The club "${club.name}" has been updated by ${req.user.email}.`,
-          });
-        } catch (err) {
-          console.error("Error sending update notification email:", {
-            message: err.message,
-            stack: err.stack,
-          });
-        }
-      }
-
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `Club "${club.name}" has been updated.`,
-          type: "general",
-        });
-      }
-
       const transformedClub = {
         ...club._doc,
-        icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
-        banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
+        icon: club.icon || null,
+        banner: club.banner || null,
       };
       res
         .status(200)
         .json({ message: "Club updated successfully", club: transformedClub });
     } catch (err) {
-      console.error("Club update error:", {
-        message: err.message,
-        stack: err.stack,
-        clubId: id,
-        userId: req.user.id,
-        requestBody: req.body,
-        files: req.files ? Object.keys(req.files) : null,
-      });
-      if (err.name === "ValidationError") {
-        return res
-          .status(400)
-          .json({ error: `Validation error: ${err.message}` });
-      }
-      res.status(500).json({ error: "Server error in club update" });
+      console.error("Club update error:", err);
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
@@ -1810,13 +1729,14 @@ app.post(
     }
 
     try {
-      if (!mongoose.isValidObjectId(club)) {
-        return res.status(400).json({ error: "Invalid club ID" });
-      }
-
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
         return res.status(404).json({ error: "Club not found" });
+      }
+
+      let bannerUrl = null;
+      if (req.file) {
+        bannerUrl = await uploadToCloudinary(req.file.buffer);
       }
 
       const event = new Event({
@@ -1826,7 +1746,7 @@ app.post(
         time,
         location,
         club,
-        banner: req.file ? req.file.path : null,
+        banner: bannerUrl,
         createdBy: req.user.id,
         category,
       });
@@ -1835,27 +1755,14 @@ app.post(
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
       await clubDoc.save();
 
-      const members = await User.find({ _id: { $in: clubDoc.members } });
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `New ${category.toLowerCase()} "${title}" created for ${clubDoc.name
-            } on ${date}.`,
-          type: "event",
-        });
-      }
-
       const transformedEvent = {
         ...event._doc,
-        banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
+        banner: event.banner || null,
       };
       res.status(201).json(transformedEvent);
     } catch (err) {
-      console.error("Event creation error:", {
-        message: err.message,
-        stack: err.stack,
-      });
-      res.status(500).json({ error: "Server error in event creation" });
+      console.error("Event creation error:", err);
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
@@ -1940,13 +1847,6 @@ app.put(
     }
 
     try {
-      if (!mongoose.isValidObjectId(id)) {
-        return res.status(400).json({ error: "Invalid event ID" });
-      }
-      if (!mongoose.isValidObjectId(club)) {
-        return res.status(400).json({ error: "Invalid club ID" });
-      }
-
       const event = await Event.findById(id);
       if (!event) {
         return res.status(404).json({ error: "Event not found" });
@@ -1957,16 +1857,13 @@ app.put(
         return res.status(404).json({ error: "Club not found" });
       }
 
-      if (req.file && event.banner) {
-        try {
-          await fs.access(event.banner);
-          await fs.unlink(event.banner);
-        } catch (err) {
-          console.warn("Failed to delete old event banner:", {
-            message: err.message,
-            path: event.banner,
-          });
+      let bannerUrl = event.banner;
+      if (req.file) {
+        if (event.banner) {
+          const publicId = event.banner.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
         }
+        bannerUrl = await uploadToCloudinary(req.file.buffer);
       }
 
       event.title = title;
@@ -1975,33 +1872,21 @@ app.put(
       event.time = time;
       event.location = location;
       event.club = club;
-      event.banner = req.file ? req.file.path : event.banner;
+      event.banner = bannerUrl;
       event.category = category;
       await event.save();
 
-      const members = await User.find({ _id: { $in: clubDoc.members } });
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `${category} "${title}" for ${clubDoc.name} has been updated.`,
-          type: "event",
-        });
-      }
-
       const transformedEvent = {
         ...event._doc,
-        banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
+        banner: event.banner || null,
       };
       res.json({
         message: "Event updated successfully",
         event: transformedEvent,
       });
     } catch (err) {
-      console.error("Event update error:", {
-        message: err.message,
-        stack: err.stack,
-      });
-      res.status(500).json({ error: "Server error in event update" });
+      console.error("Event update error:", err);
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
@@ -2099,8 +1984,9 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
     const club = await Club.findById(event.club);
     await Notification.create({
       userId,
-      message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title
-        }" in ${club.name}.`,
+      message: `You have successfully registered for the ${event.category.toLowerCase()} "${
+        event.title
+      }" in ${club.name}.`,
       type: "event",
     });
 
@@ -2603,11 +2489,9 @@ app.post(
   async (req, res) => {
     const { club, event, date, attendance } = req.body;
     if (!club || !event || !date || !Array.isArray(attendance)) {
-      return res
-        .status(400)
-        .json({
-          error: "Club, event, date, and attendance array are required",
-        });
+      return res.status(400).json({
+        error: "Club, event, date, and attendance array are required",
+      });
     }
 
     try {
@@ -2682,7 +2566,11 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${eventDoc.title}" on ${date} has been marked as ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"}).`,
+          message: `Your attendance for "${
+            eventDoc.title
+          }" on ${date} has been marked as ${entry.status} (${
+            entry.status === "present" ? "5 points" : "0 points"
+          }).`,
           type: "attendance",
         });
       }
@@ -2834,8 +2722,11 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${event.title}" on ${attendanceRecord.date.toISOString().split("T")[0]
-            } has been updated to ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"}).`,
+          message: `Your attendance for "${event.title}" on ${
+            attendanceRecord.date.toISOString().split("T")[0]
+          } has been updated to ${entry.status} (${
+            entry.status === "present" ? "5 points" : "0 points"
+          }).`,
           type: "attendance",
         });
       }
@@ -2882,7 +2773,7 @@ app.get(
         if (!attendanceRecord) {
           return res.status(404).json({ error: "Attendance record not found" });
         }
-        Rancho
+        Rancho;
       }
 
       const presentStudents = attendanceRecord.attendance
@@ -2999,11 +2890,13 @@ app.post(
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: user.email,
           subject: `Added to ${club.name}`,
-          text: `You have been added to ${club.name
-            } as a member. Please log in to the ACEM platform to view details${user.password
+          text: `You have been added to ${
+            club.name
+          } as a member. Please log in to the ACEM platform to view details${
+            user.password
               ? ". Your temporary password is 'defaultPassword123'. Please reset it upon login."
               : "."
-            }`,
+          }`,
         });
       } catch (emailErr) {
         console.error("Error sending email to new member:", {
@@ -3161,11 +3054,11 @@ app.get(
                 ],
               }),
               new Paragraph({
-                text: `Stats: Present: ${attendanceRecord.stats?.presentCount || 0
-                  }, Absent: ${attendanceRecord.stats?.absentCount || 0
-                  }, Rate: ${attendanceRecord.stats?.attendanceRate?.toFixed(
-                    2
-                  ) || 0}%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
+                text: `Stats: Present: ${
+                  attendanceRecord.stats?.presentCount || 0
+                }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${
+                  attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
+                }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
                 spacing: { after: 200 },
               }),
             ],
@@ -3286,12 +3179,10 @@ app.post(
   async (req, res) => {
     const { club, title, date, roomNo, attendance } = req.body;
     if (!club || !title || !date || !roomNo || !Array.isArray(attendance)) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Club, title, date, room number, and attendance array are required",
-        });
+      return res.status(400).json({
+        error:
+          "Club, title, date, room number, and attendance array are required",
+      });
     }
 
     if (!mongoose.isValidObjectId(club)) {
@@ -3322,12 +3213,10 @@ app.post(
         roomNo,
       });
       if (existingRecord) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Attendance record already exists for this club, title, date, and room",
+        });
       }
 
       const validAttendance = attendance.filter(
@@ -3386,7 +3275,9 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${entry.status} (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${
+            entry.status
+          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3401,12 +3292,10 @@ app.post(
         stack: err.stack,
       });
       if (err.code === 11000) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Attendance record already exists for this club, title, date, and room",
+        });
       }
       res
         .status(500)
@@ -3606,11 +3495,9 @@ app.put(
       return res.status(400).json({ error: "Invalid attendance ID" });
     }
     if (!title || !date || !roomNo || !Array.isArray(attendance)) {
-      return res
-        .status(400)
-        .json({
-          error: "Title, date, room number, and attendance array are required",
-        });
+      return res.status(400).json({
+        error: "Title, date, room number, and attendance array are required",
+      });
     }
     if (!isValidDate(date)) {
       return res.status(400).json({ error: "Invalid date format" });
@@ -3644,12 +3531,10 @@ app.put(
         _id: { $ne: id },
       });
       if (existingRecord) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Another attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Another attendance record already exists for this club, title, date, and room",
+        });
       }
 
       const validAttendance = attendance.filter(
@@ -3704,7 +3589,9 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${entry.status} (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${
+            entry.status
+          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3719,12 +3606,10 @@ app.put(
         stack: err.stack,
       });
       if (err.code === 11000) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Another attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Another attendance record already exists for this club, title, date, and room",
+        });
       }
       res
         .status(500)
@@ -3786,12 +3671,13 @@ app.get(
               }),
               ...(startDate || endDate
                 ? [
-                  new Paragraph({
-                    text: `Date Range: ${startDate || "N/A"} to ${endDate || "N/A"
+                    new Paragraph({
+                      text: `Date Range: ${startDate || "N/A"} to ${
+                        endDate || "N/A"
                       }`,
-                    spacing: { after: 200 },
-                  }),
-                ]
+                      spacing: { after: 200 },
+                    }),
+                  ]
                 : []),
               new Paragraph({
                 text: "Event Attendance",
@@ -3800,8 +3686,9 @@ app.get(
               }),
               ...eventAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Event: ${record.event.title
-                    } | Date: ${record.date.toLocaleDateString()}`,
+                  text: `Event: ${
+                    record.event.title
+                  } | Date: ${record.date.toLocaleDateString()}`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -3866,11 +3753,13 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${record.stats.presentCount
-                    }, Absent: ${record.stats.absentCount
-                    }, Rate: ${record.stats.attendanceRate.toFixed(
-                      2
-                    )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${
+                    record.stats.presentCount
+                  }, Absent: ${
+                    record.stats.absentCount
+                  }, Rate: ${record.stats.attendanceRate.toFixed(
+                    2
+                  )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -3881,7 +3770,11 @@ app.get(
               }),
               ...practiceAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Practice: ${record.title} | Date: ${record.date.toLocaleDateString()} | Room: ${record.roomNo}`,
+                  text: `Practice: ${
+                    record.title
+                  } | Date: ${record.date.toLocaleDateString()} | Room: ${
+                    record.roomNo
+                  }`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -3946,11 +3839,13 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${record.stats.presentCount
-                    }, Absent: ${record.stats.absentCount
-                    }, Rate: ${record.stats.attendanceRate.toFixed(
-                      2
-                    )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${
+                    record.stats.presentCount
+                  }, Absent: ${
+                    record.stats.absentCount
+                  }, Rate: ${record.stats.attendanceRate.toFixed(
+                    2
+                  )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -4001,29 +3896,38 @@ app.get(
 
 // Error Handling Middleware
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ error: `File upload error: ${err.message}` });
-  }
-  console.error("Unexpected error:", {
+  console.error("Server error:", {
     message: err.message,
     stack: err.stack,
     path: req.path,
     method: req.method,
     userId: req.user?.id,
   });
+
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({ error: "File size exceeds 5MB limit" });
+    }
+    return res.status(400).json({ error: `Multer error: ${err.message}` });
+  }
+
+  if (err.message.includes("Only JPEG and PNG images are allowed")) {
+    return res.status(400).json({ error: err.message });
+  }
+
   res.status(500).json({ error: "Internal server error" });
 });
 
 // Global Points Table Endpoint
-app.get('/api/points-table', authenticateToken, async (req, res) => {
+app.get("/api/points-table", authenticateToken, async (req, res) => {
   try {
     // Aggregate event attendance points (5 points per present)
     const eventPoints = await Attendance.aggregate([
-      { $unwind: '$attendance' },
-      { $match: { 'attendance.status': 'present' } },
+      { $unwind: "$attendance" },
+      { $match: { "attendance.status": "present" } },
       {
         $group: {
-          _id: '$attendance.userId',
+          _id: "$attendance.userId",
           eventPoints: { $sum: 5 },
         },
       },
@@ -4032,11 +3936,11 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
 
     // Aggregate practice attendance points (3 points per present)
     const practicePoints = await PracticeAttendance.aggregate([
-      { $unwind: '$attendance' },
-      { $match: { 'attendance.status': 'present' } },
+      { $unwind: "$attendance" },
+      { $match: { "attendance.status": "present" } },
       {
         $group: {
-          _id: '$attendance.userId',
+          _id: "$attendance.userId",
           practicePoints: { $sum: 3 },
         },
       },
@@ -4044,20 +3948,31 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
     ]);
 
     // Fetch all users with relevant fields, including clubName and avatar
-    const users = await User.find({}, 'name email rollNo clubName avatar').lean();
+    const users = await User.find(
+      {},
+      "name email rollNo clubName avatar"
+    ).lean();
 
     // Combine points and user details
     const pointsTable = users.map((user) => {
-      const eventUserPoints = eventPoints.find((ep) => ep._id.toString() === user._id.toString())?.eventPoints || 0;
-      const practiceUserPoints = practicePoints.find((pp) => pp._id.toString() === user._id.toString())?.practicePoints || 0;
+      const eventUserPoints =
+        eventPoints.find((ep) => ep._id.toString() === user._id.toString())
+          ?.eventPoints || 0;
+      const practiceUserPoints =
+        practicePoints.find((pp) => pp._id.toString() === user._id.toString())
+          ?.practicePoints || 0;
       return {
         userId: user._id.toString(),
-        name: user.name || 'Unknown',
-        email: user.email || 'N/A',
-        rollNo: user.rollNo || 'N/A',
-        clubName: Array.isArray(user.clubName) ? user.clubName : user.clubName ? [user.clubName] : [], // Ensure clubName is an array
+        name: user.name || "Unknown",
+        email: user.email || "N/A",
+        rollNo: user.rollNo || "N/A",
+        clubName: Array.isArray(user.clubName)
+          ? user.clubName
+          : user.clubName
+          ? [user.clubName]
+          : [], // Ensure clubName is an array
         totalPoints: eventUserPoints + practiceUserPoints,
-        avatar: user.avatar || 'https://via.placeholder.com/60/60'
+        avatar: user.avatar || "https://via.placeholder.com/60/60",
       };
     });
 
@@ -4069,12 +3984,12 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
 
     res.status(200).json(pointsTable);
   } catch (err) {
-    console.error('Global points table error:', {
+    console.error("Global points table error:", {
       message: err.message,
       stack: err.stack,
       userId: req.user?._id,
     });
-    res.status(500).json({ error: 'Server error fetching points table' });
+    res.status(500).json({ error: "Server error fetching points table" });
   }
 });
 // Start Server
