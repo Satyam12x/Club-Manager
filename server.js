@@ -8,6 +8,8 @@ const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs").promises;
+const { v2: cloudinary } = require("cloudinary");
+const streamifier = require("streamifier");
 const {
   Document,
   Packer,
@@ -27,27 +29,23 @@ const app = express();
 // Middlewares
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
-// Multer configuration
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "Uploads/");
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, `${uniqueSuffix}-${file.originalname}`);
-  },
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+// Multer configuration
+const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const filetypes = /jpeg|jpg|png/;
-    const extname = filetypes.test(
-      path.extname(file.originalname).toLowerCase()
-    );
     const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(
+      file.originalname.toLowerCase().split(".").pop()
+    );
     if (extname && mimetype) {
       return cb(null, true);
     }
@@ -55,6 +53,24 @@ const upload = multer({
   },
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
+
+// Function to upload file to Cloudinary
+const uploadToCloudinary = (buffer, folder = "ACEM") => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        allowed_formats: ["jpeg", "jpg", "png"],
+        public_id: `file-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      }
+    );
+    streamifier.createReadStream(buffer).pipe(stream);
+  });
+};
 
 // MongoDB Connection
 mongoose
@@ -65,7 +81,13 @@ mongoose
 // Schemas
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    trim: true,
+  },
   password: { type: String, required: true },
   mobile: { type: String, unique: true, sparse: true },
   rollNo: { type: String, unique: true, sparse: true },
@@ -245,7 +267,6 @@ const attendanceSchema = new mongoose.Schema({
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
 
-
 const practiceAttendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   title: { type: String, required: true },
@@ -283,7 +304,6 @@ const PracticeAttendance = mongoose.model(
   "PracticeAttendance",
   practiceAttendanceSchema
 );
-
 
 const isValidDate = (dateString) => {
   return !isNaN(new Date(dateString).getTime());
@@ -412,11 +432,9 @@ const isSuperAdmin = async (req, res, next) => {
           isCreator: club.creator?.toString() === user._id.toString(),
         }
       );
-      return res
-        .status(403)
-        .json({
-          error: "You are not authorized to perform this action on this club",
-        });
+      return res.status(403).json({
+        error: "You are not authorized to perform this action on this club",
+      });
     }
     next();
   } catch (err) {
@@ -745,7 +763,11 @@ app.post("/api/auth/reset-password-otp-request", async (req, res) => {
     user.resetPasswordOtp = resetOtp;
     user.resetPasswordExpires = Date.now() + 3600000; // 1 hour expiry
     await user.save();
-    console.log(`OTP generated for ${email}: ${resetOtp}, Expires: ${new Date(user.resetPasswordExpires)}`);
+    console.log(
+      `OTP generated for ${email}: ${resetOtp}, Expires: ${new Date(
+        user.resetPasswordExpires
+      )}`
+    );
 
     await transporter.sendMail({
       from: `"ACEM" <${process.env.EMAIL_USER}>`,
@@ -784,9 +806,20 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    console.log(`Verifying OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp}, expires=${user.resetPasswordExpires}, now=${Date.now()}`);
-    if (user.resetPasswordOtp !== otp || user.resetPasswordExpires < Date.now()) {
-      console.log(`OTP verification failed: provided=${otp}, stored=${user.resetPasswordOtp}, expired=${user.resetPasswordExpires < Date.now()}`);
+    console.log(
+      `Verifying OTP for ${email}: provided=${otp}, stored=${
+        user.resetPasswordOtp
+      }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
+    );
+    if (
+      user.resetPasswordOtp !== otp ||
+      user.resetPasswordExpires < Date.now()
+    ) {
+      console.log(
+        `OTP verification failed: provided=${otp}, stored=${
+          user.resetPasswordOtp
+        }, expired=${user.resetPasswordExpires < Date.now()}`
+      );
       return res.status(400).json({ error: "Invalid or expired OTP" });
     }
 
@@ -806,11 +839,19 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
 app.post("/api/auth/reset-password", async (req, res) => {
   const { email, otp, newPassword } = req.body;
   if (!email || !otp || !newPassword) {
-    console.log(`Missing fields: email=${email}, otp=${otp}, newPassword=${newPassword ? '[provided]' : 'missing'}`);
-    return res.status(400).json({ error: "Email, OTP, and new password are required" });
+    console.log(
+      `Missing fields: email=${email}, otp=${otp}, newPassword=${
+        newPassword ? "[provided]" : "missing"
+      }`
+    );
+    return res
+      .status(400)
+      .json({ error: "Email, OTP, and new password are required" });
   }
   if (newPassword.length < 6) {
-    return res.status(400).json({ error: "Password must be at least 6 characters" });
+    return res
+      .status(400)
+      .json({ error: "Password must be at least 6 characters" });
   }
 
   try {
@@ -820,9 +861,20 @@ app.post("/api/auth/reset-password", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    console.log(`Resetting password for ${email}: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp}, expires=${user.resetPasswordExpires}, now=${Date.now()}`);
-    if (user.resetPasswordOtp !== otp || user.resetPasswordExpires < Date.now()) {
-      console.log(`Password reset failed: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp}, expired=${user.resetPasswordExpires < Date.now()}`);
+    console.log(
+      `Resetting password for ${email}: provided OTP=${otp}, stored OTP=${
+        user.resetPasswordOtp
+      }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
+    );
+    if (
+      user.resetPasswordOtp !== otp ||
+      user.resetPasswordExpires < Date.now()
+    ) {
+      console.log(
+        `Password reset failed: provided OTP=${otp}, stored OTP=${
+          user.resetPasswordOtp
+        }, expired=${user.resetPasswordExpires < Date.now()}`
+      );
       return res.status(400).json({ error: "Invalid or expired OTP" });
     }
 
@@ -1067,8 +1119,8 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
           ...club,
           memberCount,
           eventsCount,
-          icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
-          banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
+          icon: club.icon || null,
+          banner: club.banner || null,
         };
       })
     );
@@ -1102,15 +1154,13 @@ app.post(
       headCoordinators,
       superAdmins,
     } = req.body;
-    if (!name || !description || !category || !req.files?.icon) {
+    if (!name || !description || !category || !req.files.icon) {
       return res
         .status(400)
         .json({ error: "Name, description, category, and icon are required" });
     }
     if (
-      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-        category
-      )
+      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)
     ) {
       return res.status(400).json({ error: "Invalid category" });
     }
@@ -1124,6 +1174,14 @@ app.post(
     }
 
     try {
+      let iconUrl, bannerUrl;
+      if (req.files.icon) {
+        iconUrl = await uploadToCloudinary(req.files.icon[0].buffer);
+      }
+      if (req.files.banner) {
+        bannerUrl = await uploadToCloudinary(req.files.banner[0].buffer);
+      }
+
       let validHeadCoordinators = [];
       if (headCoordinators) {
         const emails = headCoordinators
@@ -1166,75 +1224,43 @@ app.post(
         }
       }
 
-      const user = await User.findById(req.user.id);
-      if (!user) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
       const club = new Club({
         name,
-        icon: req.files.icon[0].path,
-        banner: req.files.banner ? req.files.banner[0].path : null,
+        icon: iconUrl,
+        banner: bannerUrl || null,
         description,
         category,
         contactEmail,
         headCoordinators: validHeadCoordinators,
         superAdmins: validSuperAdmins,
-        members: [req.user.id],
-        memberCount: 1,
+        creator: req.user.id, // Set the creator to the authenticated user's ID
+        memberCount: 0,
         eventsCount: 0,
-        creator: req.user.id,
+        members: [],
       });
       await club.save();
-
-      user.clubs.push(club._id);
-      user.clubName.push(club.name);
-      user.isClubMember = true;
-      await user.save();
-
-      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-        : [];
-      if (superAdminEmails.length > 0) {
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: superAdminEmails,
-          subject: `New Club Created: ${name}`,
-          text: `A new club "${name}" has been created by ${req.user.email}, who has joined as a member.`,
-        });
-      }
-
-      await Notification.create({
-        userId: req.user.id,
-        message: `You have successfully created and joined ${name}.`,
-        type: "membership",
-      });
 
       const populatedClub = await Club.findById(club._id)
         .populate("superAdmins", "name email")
         .populate("members", "name email")
-        .populate("creator", "name email");
+        .populate("creator", "name email"); // Ensure creator is populated
       const transformedClub = {
         ...populatedClub._doc,
-        icon: populatedClub.icon
-          ? `http://localhost:5000/${populatedClub.icon}`
-          : null,
-        banner: populatedClub.banner
-          ? `http://localhost:5000/${populatedClub.banner}`
-          : null,
+        icon: populatedClub.icon || null,
+        banner: populatedClub.banner || null,
       };
       res
         .status(201)
         .json({ message: "Club created successfully", club: transformedClub });
     } catch (err) {
-      console.error("Club creation error:", {
-        message: err.message,
-        stack: err.stack,
-      });
+      console.error("Club creation error:", err);
       if (err.code === 11000) {
         return res.status(400).json({ error: "Club name already exists" });
       }
-      res.status(500).json({ error: "Server error in club creation" });
+      if (err.name === "ValidationError") {
+        return res.status(400).json({ error: `Validation error: ${err.message}` });
+      }
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
@@ -1258,10 +1284,6 @@ app.patch(
       superAdmins,
     } = req.body;
 
-    if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ error: "Invalid club ID" });
-    }
-
     if (req.body.name) {
       return res.status(400).json({ error: "Club name cannot be updated" });
     }
@@ -1280,34 +1302,37 @@ app.patch(
       if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
         return res.status(400).json({ error: "Invalid contact email" });
       }
-      if (
-        category &&
-        !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-          category
-        )
-      ) {
-        return res.status(400).json({ error: "Invalid category" });
+
+      let iconUrl = club.icon;
+      let bannerUrl = club.banner;
+
+      if (req.files.icon) {
+        if (club.icon) {
+          const publicId = club.icon.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
+        }
+        iconUrl = await uploadToCloudinary(req.files.icon[0].buffer);
+      }
+      if (req.files.banner) {
+        if (club.banner) {
+          const publicId = club.banner.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
+        }
+        bannerUrl = await uploadToCloudinary(req.files.banner[0].buffer);
       }
 
       let validHeadCoordinators = club.headCoordinators;
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-            .split(",")
-            .map((email) => email.trim())
-            .filter((email) => email)
+              .split(",")
+              .map((email) => email.trim())
+              .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
           emailRegex.test(email)
         );
-        if (emails.length > 0 && validHeadCoordinators.length === 0) {
-          return res
-            .status(400)
-            .json({
-              error: "All provided head coordinator emails are invalid",
-            });
-        }
         await User.updateMany(
           { email: { $in: validHeadCoordinators } },
           {
@@ -1322,12 +1347,25 @@ app.patch(
           },
           {
             $pull: { headCoordinatorClubs: club.name },
-            $set: {
-              isHeadCoordinator: {
-                $cond: [{ $eq: ["$headCoordinatorClubs", []] }, false, true],
+          }
+        );
+        await User.updateMany(
+          {
+            email: { $in: club.headCoordinators },
+          },
+          [
+            {
+              $set: {
+                isHeadCoordinator: {
+                  $cond: {
+                    if: { $eq: ["$headCoordinatorClubs", []] },
+                    then: false,
+                    else: true,
+                  },
+                },
               },
             },
-          }
+          ]
         );
       }
 
@@ -1335,136 +1373,60 @@ app.patch(
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
           ? superAdmins
-            .split(",")
-            .map((id) => id.trim())
-            .filter((id) => id)
+              .split(",")
+              .map((id) => id.trim())
+              .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
             .status(400)
             .json({ error: "A club can have at most 2 super admins" });
         }
-        if (adminIds.length > 0) {
-          if (!adminIds.every((id) => mongoose.isValidObjectId(id))) {
-            return res
-              .status(400)
-              .json({ error: "Invalid super admin ID format" });
-          }
-          const users = await User.find({ _id: { $in: adminIds } });
-          validSuperAdmins = users.map((user) => user._id);
-          if (validSuperAdmins.length !== adminIds.length) {
-            return res
-              .status(400)
-              .json({ error: "One or more super admin IDs are invalid" });
-          }
-        } else {
-          validSuperAdmins = [];
+        const users = await User.find({ _id: { $in: adminIds } });
+        validSuperAdmins = users.map((user) => user._id);
+        if (validSuperAdmins.length !== adminIds.length) {
+          return res
+            .status(400)
+            .json({ error: "One or more super admin IDs are invalid" });
         }
       }
 
-      if (req.files?.icon) {
-        if (club.icon) {
-          try {
-            await fs.access(club.icon);
-            await fs.unlink(club.icon);
-          } catch (err) {
-            console.warn("Failed to delete old icon:", {
-              message: err.message,
-              path: club.icon,
-            });
-          }
+      club.icon = iconUrl;
+      club.banner = bannerUrl;
+      if (description) club.description = description;
+      if (category) {
+        if (
+          !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
+            category
+          )
+        ) {
+          return res.status(400).json({ error: "Invalid category" });
         }
-        club.icon = req.files.icon[0].path;
+        club.category = category;
       }
-      if (req.files?.banner) {
-        if (club.banner) {
-          try {
-            await fs.access(club.banner);
-            await fs.unlink(club.banner);
-          } catch (err) {
-            console.warn("Failed to delete old banner:", {
-              message: err.message,
-              path: club.banner,
-            });
-          }
-        }
-        club.banner = req.files.banner[0].path;
-      }
-      if (description !== undefined) club.description = description;
-      if (category) club.category = category;
-      if (contactEmail !== undefined) club.contactEmail = contactEmail || null;
+      if (contactEmail !== undefined) club.contactEmail = contactEmail;
       club.headCoordinators = validHeadCoordinators;
       club.superAdmins = validSuperAdmins;
 
-      club.memberCount = club.members.length;
-      try {
-        club.eventsCount = await Event.countDocuments({ club: club._id });
-      } catch (err) {
-        console.error("Error counting events:", {
-          message: err.message,
-          stack: err.stack,
-        });
-        club.eventsCount = 0;
-      }
+      club.memberCount = await User.countDocuments({ clubName: club.name });
+      club.eventsCount = await Event.countDocuments({ club: club._id });
 
       await club.save();
 
-      const members = await User.find({ _id: { $in: club.members } });
-      const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-        ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
-        : [];
-      const recipients = [...members.map((m) => m.email), ...superAdminEmails];
-      if (recipients.length > 0) {
-        try {
-          await transporter.sendMail({
-            from: `"ACEM" <${process.env.EMAIL_USER}>`,
-            to: recipients,
-            subject: `Club Updated: ${club.name}`,
-            text: `The club "${club.name}" has been updated by ${req.user.email}.`,
-          });
-        } catch (err) {
-          console.error("Error sending update notification email:", {
-            message: err.message,
-            stack: err.stack,
-          });
-        }
-      }
-
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `Club "${club.name}" has been updated.`,
-          type: "general",
-        });
-      }
-
       const transformedClub = {
         ...club._doc,
-        icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
-        banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
+        icon: club.icon || null,
+        banner: club.banner || null,
       };
       res
         .status(200)
         .json({ message: "Club updated successfully", club: transformedClub });
     } catch (err) {
-      console.error("Club update error:", {
-        message: err.message,
-        stack: err.stack,
-        clubId: id,
-        userId: req.user.id,
-        requestBody: req.body,
-        files: req.files ? Object.keys(req.files) : null,
-      });
-      if (err.name === "ValidationError") {
-        return res
-          .status(400)
-          .json({ error: `Validation error: ${err.message}` });
-      }
-      res.status(500).json({ error: "Server error in club update" });
+      console.error("Club update error:", err);
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
-
 // Delete Club (Creator, Super Admin, or Head Coordinator only)
 app.delete(
   "/api/clubs/:id",
@@ -1808,8 +1770,8 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
     }
     const transformedClub = {
       ...club._doc,
-      icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
-      banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
+      icon: club.icon || null,
+      banner: club.banner || null,
       memberCount: club.members.length,
     };
     res.json(transformedClub);
@@ -1928,19 +1890,28 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
     }
 
     if (!user.clubs.includes(club._id) || !user.clubName.includes(club.name)) {
-      return res.status(400).json({ error: "You are not a member of this club" });
+      return res
+        .status(400)
+        .json({ error: "You are not a member of this club" });
     }
 
     const isSuperAdmin = club.superAdmins.includes(user._id);
-    const isHeadCoordinator = user.isHeadCoordinator && user.headCoordinatorClubs.includes(club.name);
+    const isHeadCoordinator =
+      user.isHeadCoordinator && user.headCoordinatorClubs.includes(club.name);
     if (isSuperAdmin || isHeadCoordinator) {
-      return res.status(403).json({ error: "Admins and head coordinators cannot leave the club" });
+      return res
+        .status(403)
+        .json({ error: "Admins and head coordinators cannot leave the club" });
     }
 
-    user.clubs = user.clubs.filter((clubId) => clubId.toString() !== club._id.toString());
+    user.clubs = user.clubs.filter(
+      (clubId) => clubId.toString() !== club._id.toString()
+    );
     user.clubName = user.clubName.filter((name) => name !== club.name);
     user.isClubMember = user.clubName.length > 0;
-    club.members = club.members.filter((memberId) => memberId.toString() !== user._id.toString());
+    club.members = club.members.filter(
+      (memberId) => memberId.toString() !== user._id.toString()
+    );
     club.memberCount = club.members.length;
 
     await user.save();
@@ -1974,7 +1945,10 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
 
     res.json({ message: "You have left the club successfully" });
   } catch (err) {
-    console.error("Error leaving club:", { message: err.message, stack: err.stack });
+    console.error("Error leaving club:", {
+      message: err.message,
+      stack: err.stack,
+    });
     res.status(500).json({ error: "Server error in leaving club" });
   }
 });
@@ -2035,8 +2009,9 @@ app.post(
       for (const member of members) {
         await Notification.create({
           userId: member._id,
-          message: `New ${category.toLowerCase()} "${title}" created for ${clubDoc.name
-            } on ${date}.`,
+          message: `New ${category.toLowerCase()} "${title}" created for ${
+            clubDoc.name
+          } on ${date}.`,
           type: "event",
         });
       }
@@ -2295,8 +2270,9 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
     const club = await Club.findById(event.club);
     await Notification.create({
       userId,
-      message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title
-        }" in ${club.name}.`,
+      message: `You have successfully registered for the ${event.category.toLowerCase()} "${
+        event.title
+      }" in ${club.name}.`,
       type: "event",
     });
 
@@ -2799,11 +2775,9 @@ app.post(
   async (req, res) => {
     const { club, event, date, attendance } = req.body;
     if (!club || !event || !date || !Array.isArray(attendance)) {
-      return res
-        .status(400)
-        .json({
-          error: "Club, event, date, and attendance array are required",
-        });
+      return res.status(400).json({
+        error: "Club, event, date, and attendance array are required",
+      });
     }
 
     try {
@@ -2878,7 +2852,11 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${eventDoc.title}" on ${date} has been marked as ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"}).`,
+          message: `Your attendance for "${
+            eventDoc.title
+          }" on ${date} has been marked as ${entry.status} (${
+            entry.status === "present" ? "5 points" : "0 points"
+          }).`,
           type: "attendance",
         });
       }
@@ -3030,8 +3008,11 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${event.title}" on ${attendanceRecord.date.toISOString().split("T")[0]
-            } has been updated to ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"}).`,
+          message: `Your attendance for "${event.title}" on ${
+            attendanceRecord.date.toISOString().split("T")[0]
+          } has been updated to ${entry.status} (${
+            entry.status === "present" ? "5 points" : "0 points"
+          }).`,
           type: "attendance",
         });
       }
@@ -3078,7 +3059,7 @@ app.get(
         if (!attendanceRecord) {
           return res.status(404).json({ error: "Attendance record not found" });
         }
-        Rancho
+        Rancho;
       }
 
       const presentStudents = attendanceRecord.attendance
@@ -3195,11 +3176,13 @@ app.post(
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: user.email,
           subject: `Added to ${club.name}`,
-          text: `You have been added to ${club.name
-            } as a member. Please log in to the ACEM platform to view details${user.password
+          text: `You have been added to ${
+            club.name
+          } as a member. Please log in to the ACEM platform to view details${
+            user.password
               ? ". Your temporary password is 'defaultPassword123'. Please reset it upon login."
               : "."
-            }`,
+          }`,
         });
       } catch (emailErr) {
         console.error("Error sending email to new member:", {
@@ -3357,11 +3340,11 @@ app.get(
                 ],
               }),
               new Paragraph({
-                text: `Stats: Present: ${attendanceRecord.stats?.presentCount || 0
-                  }, Absent: ${attendanceRecord.stats?.absentCount || 0
-                  }, Rate: ${attendanceRecord.stats?.attendanceRate?.toFixed(
-                    2
-                  ) || 0}%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
+                text: `Stats: Present: ${
+                  attendanceRecord.stats?.presentCount || 0
+                }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${
+                  attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
+                }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
                 spacing: { after: 200 },
               }),
             ],
@@ -3482,12 +3465,10 @@ app.post(
   async (req, res) => {
     const { club, title, date, roomNo, attendance } = req.body;
     if (!club || !title || !date || !roomNo || !Array.isArray(attendance)) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Club, title, date, room number, and attendance array are required",
-        });
+      return res.status(400).json({
+        error:
+          "Club, title, date, room number, and attendance array are required",
+      });
     }
 
     if (!mongoose.isValidObjectId(club)) {
@@ -3518,12 +3499,10 @@ app.post(
         roomNo,
       });
       if (existingRecord) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Attendance record already exists for this club, title, date, and room",
+        });
       }
 
       const validAttendance = attendance.filter(
@@ -3582,7 +3561,9 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${entry.status} (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${
+            entry.status
+          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3597,12 +3578,10 @@ app.post(
         stack: err.stack,
       });
       if (err.code === 11000) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Attendance record already exists for this club, title, date, and room",
+        });
       }
       res
         .status(500)
@@ -3802,11 +3781,9 @@ app.put(
       return res.status(400).json({ error: "Invalid attendance ID" });
     }
     if (!title || !date || !roomNo || !Array.isArray(attendance)) {
-      return res
-        .status(400)
-        .json({
-          error: "Title, date, room number, and attendance array are required",
-        });
+      return res.status(400).json({
+        error: "Title, date, room number, and attendance array are required",
+      });
     }
     if (!isValidDate(date)) {
       return res.status(400).json({ error: "Invalid date format" });
@@ -3840,12 +3817,10 @@ app.put(
         _id: { $ne: id },
       });
       if (existingRecord) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Another attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Another attendance record already exists for this club, title, date, and room",
+        });
       }
 
       const validAttendance = attendance.filter(
@@ -3900,7 +3875,9 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${entry.status} (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${
+            entry.status
+          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3915,12 +3892,10 @@ app.put(
         stack: err.stack,
       });
       if (err.code === 11000) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "Another attendance record already exists for this club, title, date, and room",
-          });
+        return res.status(400).json({
+          error:
+            "Another attendance record already exists for this club, title, date, and room",
+        });
       }
       res
         .status(500)
@@ -3982,12 +3957,13 @@ app.get(
               }),
               ...(startDate || endDate
                 ? [
-                  new Paragraph({
-                    text: `Date Range: ${startDate || "N/A"} to ${endDate || "N/A"
+                    new Paragraph({
+                      text: `Date Range: ${startDate || "N/A"} to ${
+                        endDate || "N/A"
                       }`,
-                    spacing: { after: 200 },
-                  }),
-                ]
+                      spacing: { after: 200 },
+                    }),
+                  ]
                 : []),
               new Paragraph({
                 text: "Event Attendance",
@@ -3996,8 +3972,9 @@ app.get(
               }),
               ...eventAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Event: ${record.event.title
-                    } | Date: ${record.date.toLocaleDateString()}`,
+                  text: `Event: ${
+                    record.event.title
+                  } | Date: ${record.date.toLocaleDateString()}`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -4062,11 +4039,13 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${record.stats.presentCount
-                    }, Absent: ${record.stats.absentCount
-                    }, Rate: ${record.stats.attendanceRate.toFixed(
-                      2
-                    )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${
+                    record.stats.presentCount
+                  }, Absent: ${
+                    record.stats.absentCount
+                  }, Rate: ${record.stats.attendanceRate.toFixed(
+                    2
+                  )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -4077,7 +4056,11 @@ app.get(
               }),
               ...practiceAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Practice: ${record.title} | Date: ${record.date.toLocaleDateString()} | Room: ${record.roomNo}`,
+                  text: `Practice: ${
+                    record.title
+                  } | Date: ${record.date.toLocaleDateString()} | Room: ${
+                    record.roomNo
+                  }`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -4142,11 +4125,13 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${record.stats.presentCount
-                    }, Absent: ${record.stats.absentCount
-                    }, Rate: ${record.stats.attendanceRate.toFixed(
-                      2
-                    )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${
+                    record.stats.presentCount
+                  }, Absent: ${
+                    record.stats.absentCount
+                  }, Rate: ${record.stats.attendanceRate.toFixed(
+                    2
+                  )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -4210,15 +4195,15 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-app.get('/api/points-table', authenticateToken, async (req, res) => {
+app.get("/api/points-table", authenticateToken, async (req, res) => {
   try {
     // Aggregate event attendance points (5 points per present)
     const eventPoints = await Attendance.aggregate([
-      { $unwind: '$attendance' },
-      { $match: { 'attendance.status': 'present' } },
+      { $unwind: "$attendance" },
+      { $match: { "attendance.status": "present" } },
       {
         $group: {
-          _id: '$attendance.userId',
+          _id: "$attendance.userId",
           eventPoints: { $sum: 5 },
         },
       },
@@ -4227,11 +4212,11 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
 
     // Aggregate practice attendance points (3 points per present)
     const practicePoints = await PracticeAttendance.aggregate([
-      { $unwind: '$attendance' },
-      { $match: { 'attendance.status': 'present' } },
+      { $unwind: "$attendance" },
+      { $match: { "attendance.status": "present" } },
       {
         $group: {
-          _id: '$attendance.userId',
+          _id: "$attendance.userId",
           practicePoints: { $sum: 3 },
         },
       },
@@ -4239,51 +4224,65 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
     ]);
 
     // Fetch all users with relevant fields, including clubName, clubRoles, and avatar
-    const users = await User.find({}, 'name email rollNo clubName clubRoles avatar').lean();
+    const users = await User.find(
+      {},
+      "name email rollNo clubName clubRoles avatar"
+    ).lean();
 
     // Combine points, user details, and filter by member roles
     const pointsTable = users
       .map((user) => {
         // Ensure clubName is an array
-        const clubNames = Array.isArray(user.clubName) ? user.clubName : user.clubName ? [user.clubName] : [];
+        const clubNames = Array.isArray(user.clubName)
+          ? user.clubName
+          : user.clubName
+          ? [user.clubName]
+          : [];
 
         // Construct clubRoles if not provided, defaulting to 'member' for each club
-        const clubRoles = user.clubRoles || clubNames.map(clubName => ({
-          clubName,
-          roles: ['member']
-        }));
+        const clubRoles =
+          user.clubRoles ||
+          clubNames.map((clubName) => ({
+            clubName,
+            roles: ["member"],
+          }));
 
         // Filter clubs where the user is only a member (exclude headCoordinator, admin, superAdmin)
         const memberClubs = clubRoles
-          .filter(clubRole => 
-            clubRole.roles.includes('member') && 
-            !clubRole.roles.includes('headCoordinator') && 
-            !clubRole.roles.includes('admin') && 
-            !clubRole.roles.includes('superAdmin')
+          .filter(
+            (clubRole) =>
+              clubRole.roles.includes("member") &&
+              !clubRole.roles.includes("headCoordinator") &&
+              !clubRole.roles.includes("admin") &&
+              !clubRole.roles.includes("superAdmin")
           )
-          .map(clubRole => clubRole.clubName);
+          .map((clubRole) => clubRole.clubName);
 
         // Skip users with no member clubs
         if (memberClubs.length === 0) return null;
 
-        const eventUserPoints = eventPoints.find((ep) => ep._id.toString() === user._id.toString())?.eventPoints || 0;
-        const practiceUserPoints = practicePoints.find((pp) => pp._id.toString() === user._id.toString())?.practicePoints || 0;
+        const eventUserPoints =
+          eventPoints.find((ep) => ep._id.toString() === user._id.toString())
+            ?.eventPoints || 0;
+        const practiceUserPoints =
+          practicePoints.find((pp) => pp._id.toString() === user._id.toString())
+            ?.practicePoints || 0;
 
         return {
           userId: user._id.toString(),
-          name: user.name || 'Unknown',
-          email: user.email || 'N/A',
-          rollNo: user.rollNo || 'N/A',
+          name: user.name || "Unknown",
+          email: user.email || "N/A",
+          rollNo: user.rollNo || "N/A",
           clubName: memberClubs,
-          clubRoles: clubRoles.map(role => ({
+          clubRoles: clubRoles.map((role) => ({
             clubName: role.clubName,
-            roles: Array.isArray(role.roles) ? role.roles : [role.roles]
+            roles: Array.isArray(role.roles) ? role.roles : [role.roles],
           })),
           totalPoints: eventUserPoints + practiceUserPoints,
-          avatar: user.avatar || 'https://via.placeholder.com/60/60'
+          avatar: user.avatar || "https://via.placeholder.com/60/60",
         };
       })
-      .filter(user => user !== null); // Remove users with no member clubs
+      .filter((user) => user !== null); // Remove users with no member clubs
 
     // Sort by totalPoints in descending order
     pointsTable.sort((a, b) => b.totalPoints - a.totalPoints);
@@ -4293,87 +4292,67 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
 
     res.status(200).json(pointsTable);
   } catch (err) {
-    console.error('Member points table error:', {
+    console.error("Member points table error:", {
       message: err.message,
       stack: err.stack,
       userId: req.user?._id,
     });
-    res.status(500).json({ error: 'Server error fetching points table' });
+    res.status(500).json({ error: "Server error fetching points table" });
   }
 });
 
-app.patch('/api/membership-requests/:id', authenticateToken, isHeadCoordinatorOrAdmin, async (req, res) => {
-  try {
-    const { status } = req.body;
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status. Use "approved" or "rejected".' });
-    }
-
-    if (status === 'approved') {
-      const membershipRequest = await MembershipRequest.findById(req.params.id);
-      if (!membershipRequest) {
-        return res.status(404).json({ error: 'Membership request not found' });
+app.patch(
+  "/api/membership-requests/:id",
+  authenticateToken,
+  isHeadCoordinatorOrAdmin,
+  async (req, res) => {
+    try {
+      const { status } = req.body;
+      if (!["approved", "rejected"].includes(status)) {
+        return res
+          .status(400)
+          .json({ error: 'Invalid status. Use "approved" or "rejected".' });
       }
 
-      const club = await Club.findOne({ clubName: membershipRequest.clubName });
-      if (!club) {
-        return res.status(404).json({ error: 'Club not found' });
-      }
+      if (status === "approved") {
+        const membershipRequest = await MembershipRequest.findById(
+          req.params.id
+        );
+        if (!membershipRequest) {
+          return res
+            .status(404)
+            .json({ error: "Membership request not found" });
+        }
 
-      const user = await User.findById(membershipRequest.userId);
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
+        const club = await Club.findOne({
+          clubName: membershipRequest.clubName,
+        });
+        if (!club) {
+          return res.status(404).json({ error: "Club not found" });
+        }
 
-      if (club.members.some(memberId => memberId.equals(user._id))) {
-        return res.status(400).json({ error: 'User is already a member of this club' });
-      }
+        const user = await User.findById(membershipRequest.userId);
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
 
-      club.members.push(user._id);
-      await club.save();
+        if (club.members.some((memberId) => memberId.equals(user._id))) {
+          return res
+            .status(400)
+            .json({ error: "User is already a member of this club" });
+        }
 
-      user.clubs.push({ clubName: club.clubName, clubId: club._id });
-      await user.save();
+        club.members.push(user._id);
+        await club.save();
 
-      const notification = new Notification({
-        userId: user._id,
-        message: `Your membership request for ${club.clubName} has been accepted.`,
-        type: 'membership_accepted',
-        relatedId: club._id,
-      });
-      await notification.save();
+        user.clubs.push({ clubName: club.clubName, clubId: club._id });
+        await user.save();
 
-      try {
-        const mailOptions = {
-          from: process.env.EMAIL_USER,
-          to: user.email,
-          subject: 'Membership Request Accepted',
-          text: `Dear ${user.name},\n\nYour membership request for ${club.clubName} has been accepted. Welcome to the club!\n\nBest regards,\nACEM Team`,
-        };
-        await transporter.sendMail(mailOptions);
-      } catch (emailErr) {
-        console.error(`Failed to send email to ${user.email}:`, emailErr);
-      }
-
-      await MembershipRequest.findByIdAndDelete(req.params.id);
-      res.json({ message: 'Membership request approved successfully' });
-    } else {
-      const membershipRequest = await MembershipRequest.findByIdAndUpdate(
-        req.params.id,
-        { status: 'rejected' },
-        { new: true }
-      );
-      if (!membershipRequest) {
-        return res.status(404).json({ error: 'Membership request not found' });
-      }
-
-      const user = await User.findById(membershipRequest.userId);
-      if (user) {
         const notification = new Notification({
           userId: user._id,
-          message: `Your membership request for ${membershipRequest.clubName} has been rejected.`,
-          type: 'membership_rejected',
-          relatedId: membershipRequest._id,
+          message: `Your membership request for ${club.clubName} has been accepted.`,
+          type: "membership_accepted",
+          relatedId: club._id,
         });
         await notification.save();
 
@@ -4381,28 +4360,65 @@ app.patch('/api/membership-requests/:id', authenticateToken, isHeadCoordinatorOr
           const mailOptions = {
             from: process.env.EMAIL_USER,
             to: user.email,
-            subject: 'Membership Request Rejected',
-            text: `Dear ${user.name},\n\nYour membership request for ${membershipRequest.clubName} has been rejected.\n\nBest regards,\nACEM Team`,
+            subject: "Membership Request Accepted",
+            text: `Dear ${user.name},\n\nYour membership request for ${club.clubName} has been accepted. Welcome to the club!\n\nBest regards,\nACEM Team`,
           };
           await transporter.sendMail(mailOptions);
         } catch (emailErr) {
           console.error(`Failed to send email to ${user.email}:`, emailErr);
         }
-      }
 
-      await MembershipRequest.findByIdAndDelete(req.params.id);
-      res.json({ message: 'Membership request rejected successfully' });
+        await MembershipRequest.findByIdAndDelete(req.params.id);
+        res.json({ message: "Membership request approved successfully" });
+      } else {
+        const membershipRequest = await MembershipRequest.findByIdAndUpdate(
+          req.params.id,
+          { status: "rejected" },
+          { new: true }
+        );
+        if (!membershipRequest) {
+          return res
+            .status(404)
+            .json({ error: "Membership request not found" });
+        }
+
+        const user = await User.findById(membershipRequest.userId);
+        if (user) {
+          const notification = new Notification({
+            userId: user._id,
+            message: `Your membership request for ${membershipRequest.clubName} has been rejected.`,
+            type: "membership_rejected",
+            relatedId: membershipRequest._id,
+          });
+          await notification.save();
+
+          try {
+            const mailOptions = {
+              from: process.env.EMAIL_USER,
+              to: user.email,
+              subject: "Membership Request Rejected",
+              text: `Dear ${user.name},\n\nYour membership request for ${membershipRequest.clubName} has been rejected.\n\nBest regards,\nACEM Team`,
+            };
+            await transporter.sendMail(mailOptions);
+          } catch (emailErr) {
+            console.error(`Failed to send email to ${user.email}:`, emailErr);
+          }
+        }
+
+        await MembershipRequest.findByIdAndDelete(req.params.id);
+        res.json({ message: "Membership request rejected successfully" });
+      }
+    } catch (err) {
+      console.error("Error updating membership request:", {
+        error: err.message,
+        stack: err.stack,
+        userId: req.user?.id,
+        membershipRequestId: req.params.id,
+      });
+      res.status(500).json({ error: "Server error", details: err.message });
     }
-  } catch (err) {
-    console.error('Error updating membership request:', {
-      error: err.message,
-      stack: err.stack,
-      userId: req.user?.id,
-      membershipRequestId: req.params.id,
-    });
-    res.status(500).json({ error: 'Server error', details: err.message });
   }
-});
+);
 // Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
