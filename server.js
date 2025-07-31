@@ -229,6 +229,7 @@ const attendanceSchema = new mongoose.Schema({
     absentCount: { type: Number, default: 0 },
     totalMarked: { type: Number, default: 0 },
     attendanceRate: { type: Number, default: 0 },
+    totalPoints: { type: Number, default: 0 }, // New field for total points
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -240,10 +241,11 @@ const attendanceSchema = new mongoose.Schema({
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
 
+
 const practiceAttendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   title: { type: String, required: true },
-  date: { type: Date, required: true }, // Changed to Date type
+  date: { type: Date, required: true },
   roomNo: { type: String, required: true },
   attendance: [
     {
@@ -260,6 +262,7 @@ const practiceAttendanceSchema = new mongoose.Schema({
     absentCount: { type: Number, default: 0 },
     totalMarked: { type: Number, default: 0 },
     attendanceRate: { type: Number, default: 0 },
+    totalPoints: { type: Number, default: 0 }, // New field for total points
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -276,6 +279,7 @@ const PracticeAttendance = mongoose.model(
   "PracticeAttendance",
   practiceAttendanceSchema
 );
+
 
 const isValidDate = (dateString) => {
   return !isNaN(new Date(dateString).getTime());
@@ -1162,9 +1166,9 @@ app.patch(
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-              .split(",")
-              .map((email) => email.trim())
-              .filter((email) => email)
+            .split(",")
+            .map((email) => email.trim())
+            .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
@@ -1204,9 +1208,9 @@ app.patch(
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
           ? superAdmins
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id)
+            .split(",")
+            .map((id) => id.trim())
+            .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
@@ -1835,9 +1839,8 @@ app.post(
       for (const member of members) {
         await Notification.create({
           userId: member._id,
-          message: `New ${category.toLowerCase()} "${title}" created for ${
-            clubDoc.name
-          } on ${date}.`,
+          message: `New ${category.toLowerCase()} "${title}" created for ${clubDoc.name
+            } on ${date}.`,
           type: "event",
         });
       }
@@ -2096,9 +2099,8 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
     const club = await Club.findById(event.club);
     await Notification.create({
       userId,
-      message: `You have successfully registered for the ${event.category.toLowerCase()} "${
-        event.title
-      }" in ${club.name}.`,
+      message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title
+        }" in ${club.name}.`,
       type: "event",
     });
 
@@ -2659,6 +2661,7 @@ app.post(
       ).length;
       const absentCount = validAttendance.length - presentCount;
       const attendanceRate = (presentCount / validAttendance.length) * 100;
+      const totalPoints = presentCount * 5; // 5 points per present student
 
       const attendanceRecord = new Attendance({
         club,
@@ -2670,6 +2673,7 @@ app.post(
           absentCount,
           totalMarked: validAttendance.length,
           attendanceRate,
+          totalPoints,
         },
         createdBy: req.user.id,
       });
@@ -2678,15 +2682,14 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${eventDoc.title}" on ${date} has been marked as ${entry.status}.`,
+          message: `Your attendance for "${eventDoc.title}" on ${date} has been marked as ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"}).`,
           type: "attendance",
         });
       }
 
-      // Ensure response is not wrapped unnecessarily
       res.status(201).json({
         message: "Attendance recorded successfully",
-        data: attendanceRecord.toObject(), // Use toObject to avoid Mongoose metadata
+        data: attendanceRecord.toObject(),
       });
     } catch (err) {
       console.error("Attendance creation error:", {
@@ -2816,6 +2819,7 @@ app.put(
       ).length;
       const absentCount = validAttendance.length - presentCount;
       const attendanceRate = (presentCount / validAttendance.length) * 100;
+      const totalPoints = presentCount * 5; // 5 points per present student
 
       attendanceRecord.attendance = validAttendance;
       attendanceRecord.stats = {
@@ -2823,15 +2827,15 @@ app.put(
         absentCount,
         totalMarked: validAttendance.length,
         attendanceRate,
+        totalPoints,
       };
       await attendanceRecord.save();
 
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${event.title}" on ${
-            attendanceRecord.date.toISOString().split("T")[0]
-          } has been updated to ${entry.status}.`,
+          message: `Your attendance for "${event.title}" on ${attendanceRecord.date.toISOString().split("T")[0]
+            } has been updated to ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -2862,22 +2866,23 @@ app.get(
         return res.status(400).json({ error: "Invalid attendance ID" });
       }
 
-      // Check if it's an event attendance record
       let attendanceRecord = await Attendance.findById(id)
         .populate("attendance.userId", "name email rollNo")
         .populate("club", "name")
         .populate("event", "title");
 
       let type = "event";
+      let pointsPerPresent = 5;
       if (!attendanceRecord) {
-        // Check if it's a practice attendance record
         attendanceRecord = await PracticeAttendance.findById(id)
           .populate("attendance.userId", "name email rollNo")
           .populate("club", "name");
         type = "practice";
+        pointsPerPresent = 3;
         if (!attendanceRecord) {
           return res.status(404).json({ error: "Attendance record not found" });
         }
+        Rancho
       }
 
       const presentStudents = attendanceRecord.attendance
@@ -2886,6 +2891,7 @@ app.get(
           name: entry.userId.name,
           email: entry.userId.email,
           rollNo: entry.userId.rollNo,
+          points: entry.status === "present" ? pointsPerPresent : 0,
         }));
 
       res.json({
@@ -2898,6 +2904,7 @@ app.get(
         date: attendanceRecord.date,
         roomNo: type === "practice" ? attendanceRecord.roomNo : undefined,
         presentStudents,
+        totalPoints: attendanceRecord.stats.totalPoints,
       });
     } catch (err) {
       console.error("Error fetching present students:", {
@@ -2992,13 +2999,11 @@ app.post(
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: user.email,
           subject: `Added to ${club.name}`,
-          text: `You have been added to ${
-            club.name
-          } as a member. Please log in to the ACEM platform to view details${
-            user.password
+          text: `You have been added to ${club.name
+            } as a member. Please log in to the ACEM platform to view details${user.password
               ? ". Your temporary password is 'defaultPassword123'. Please reset it upon login."
               : "."
-          }`,
+            }`,
         });
       } catch (emailErr) {
         console.error("Error sending email to new member:", {
@@ -3054,7 +3059,6 @@ app.get(
           .json({ error: "Invalid practice attendance ID" });
       }
 
-      // Fetch practice attendance record
       const attendanceRecord = await PracticeAttendance.findById(id)
         .populate("attendance.userId", "name email rollNo")
         .populate("club", "name");
@@ -3072,7 +3076,6 @@ app.get(
         : "N/A";
       const roomNo = attendanceRecord.roomNo || "N/A";
 
-      // Create DOCX document
       const doc = new Document({
         sections: [
           {
@@ -3103,7 +3106,7 @@ app.get(
                     children: [
                       new TableCell({
                         children: [new Paragraph("Name")],
-                        width: { size: 25, type: WidthType.PERCENTAGE },
+                        width: { size: 20, type: WidthType.PERCENTAGE },
                       }),
                       new TableCell({
                         children: [new Paragraph("Email")],
@@ -3111,11 +3114,15 @@ app.get(
                       }),
                       new TableCell({
                         children: [new Paragraph("Roll No")],
-                        width: { size: 25, type: WidthType.PERCENTAGE },
+                        width: { size: 20, type: WidthType.PERCENTAGE },
                       }),
                       new TableCell({
                         children: [new Paragraph("Status")],
-                        width: { size: 25, type: WidthType.PERCENTAGE },
+                        width: { size: 20, type: WidthType.PERCENTAGE },
+                      }),
+                      new TableCell({
+                        children: [new Paragraph("Points")],
+                        width: { size: 15, type: WidthType.PERCENTAGE },
                       }),
                     ],
                   }),
@@ -3141,17 +3148,24 @@ app.get(
                           new TableCell({
                             children: [new Paragraph(entry.status || "N/A")],
                           }),
+                          new TableCell({
+                            children: [
+                              new Paragraph(
+                                entry.status === "present" ? "3" : "0"
+                              ),
+                            ],
+                          }),
                         ],
                       })
                   ) || []),
                 ],
               }),
               new Paragraph({
-                text: `Stats: Present: ${
-                  attendanceRecord.stats?.presentCount || 0
-                }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${
-                  attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
-                }%`,
+                text: `Stats: Present: ${attendanceRecord.stats?.presentCount || 0
+                  }, Absent: ${attendanceRecord.stats?.absentCount || 0
+                  }, Rate: ${attendanceRecord.stats?.attendanceRate?.toFixed(
+                    2
+                  ) || 0}%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
                 spacing: { after: 200 },
               }),
             ],
@@ -3159,7 +3173,6 @@ app.get(
         ],
       });
 
-      // Generate buffer and send directly
       const buffer = await Packer.toBuffer(doc);
       const safeTitle = title.replace(/[^a-zA-Z0-9]/g, "_");
       const fileName = `Practice_Attendance_${clubName}_${safeTitle}_${date.replace(
@@ -3167,7 +3180,6 @@ app.get(
         "_"
       )}.docx`;
 
-      // Send email with report attachment to the requesting user
       const user = await User.findById(req.user.id);
       if (!user) {
         return res.status(404).json({ error: "User not found" });
@@ -3248,7 +3260,11 @@ app.get("/api/attendance/user", authenticateToken, async (req, res) => {
         club: record.club,
         date: record.date,
         status: userEntry ? userEntry.status : "unknown",
-        stats: record.stats,
+        points: userEntry && userEntry.status === "present" ? 5 : 0, // 5 points for present
+        stats: {
+          ...record.stats,
+          totalPoints: record.stats.totalPoints, // Include total points
+        },
       };
     });
 
@@ -3347,6 +3363,7 @@ app.post(
         validAttendance.length > 0
           ? (presentCount / validAttendance.length) * 100
           : 0;
+      const totalPoints = presentCount * 3; // 3 points per present student
 
       const practiceAttendance = new PracticeAttendance({
         club,
@@ -3359,6 +3376,7 @@ app.post(
           absentCount,
           totalMarked: validAttendance.length,
           attendanceRate,
+          totalPoints,
         },
         createdBy: req.user.id,
       });
@@ -3368,7 +3386,7 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${entry.status}.`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${entry.status} (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3554,7 +3572,11 @@ app.get(
           date: record.date,
           roomNo: record.roomNo,
           status: userEntry ? userEntry.status : "unknown",
-          stats: record.stats,
+          points: userEntry && userEntry.status === "present" ? 3 : 0, // 3 points for present
+          stats: {
+            ...record.stats,
+            totalPoints: record.stats.totalPoints, // Include total points
+          },
         };
       });
 
@@ -3619,7 +3641,7 @@ app.put(
         title,
         date: new Date(date),
         roomNo,
-        _id: { $ne: id }, // Exclude current record
+        _id: { $ne: id },
       });
       if (existingRecord) {
         return res
@@ -3663,6 +3685,7 @@ app.put(
         validAttendance.length > 0
           ? (presentCount / validAttendance.length) * 100
           : 0;
+      const totalPoints = presentCount * 3; // 3 points per present student
 
       practiceAttendance.title = title;
       practiceAttendance.date = new Date(date);
@@ -3673,6 +3696,7 @@ app.put(
         absentCount,
         totalMarked: validAttendance.length,
         attendanceRate,
+        totalPoints,
       };
       await practiceAttendance.save();
 
@@ -3680,7 +3704,7 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${entry.status}.`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${entry.status} (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3746,7 +3770,6 @@ app.get(
         "name email rollNo"
       );
 
-      // Create DOCX document
       const doc = new Document({
         sections: [
           {
@@ -3763,13 +3786,12 @@ app.get(
               }),
               ...(startDate || endDate
                 ? [
-                    new Paragraph({
-                      text: `Date Range: ${startDate || "N/A"} to ${
-                        endDate || "N/A"
+                  new Paragraph({
+                    text: `Date Range: ${startDate || "N/A"} to ${endDate || "N/A"
                       }`,
-                      spacing: { after: 200 },
-                    }),
-                  ]
+                    spacing: { after: 200 },
+                  }),
+                ]
                 : []),
               new Paragraph({
                 text: "Event Attendance",
@@ -3778,9 +3800,8 @@ app.get(
               }),
               ...eventAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Event: ${
-                    record.event.title
-                  } | Date: ${record.date.toLocaleDateString()}`,
+                  text: `Event: ${record.event.title
+                    } | Date: ${record.date.toLocaleDateString()}`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -3790,7 +3811,7 @@ app.get(
                       children: [
                         new TableCell({
                           children: [new Paragraph("Name")],
-                          width: { size: 25, type: WidthType.PERCENTAGE },
+                          width: { size: 20, type: WidthType.PERCENTAGE },
                         }),
                         new TableCell({
                           children: [new Paragraph("Email")],
@@ -3798,11 +3819,15 @@ app.get(
                         }),
                         new TableCell({
                           children: [new Paragraph("Roll No")],
-                          width: { size: 25, type: WidthType.PERCENTAGE },
+                          width: { size: 20, type: WidthType.PERCENTAGE },
                         }),
                         new TableCell({
                           children: [new Paragraph("Status")],
-                          width: { size: 25, type: WidthType.PERCENTAGE },
+                          width: { size: 20, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Points")],
+                          width: { size: 15, type: WidthType.PERCENTAGE },
                         }),
                       ],
                     }),
@@ -3828,17 +3853,24 @@ app.get(
                             new TableCell({
                               children: [new Paragraph(entry.status)],
                             }),
+                            new TableCell({
+                              children: [
+                                new Paragraph(
+                                  entry.status === "present" ? "5" : "0"
+                                ),
+                              ],
+                            }),
                           ],
                         })
                     ),
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(2)}%`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -3849,7 +3881,7 @@ app.get(
               }),
               ...practiceAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Practice: ${record.title} | Date: ${record.date} | Room: ${record.roomNo}`,
+                  text: `Practice: ${record.title} | Date: ${record.date.toLocaleDateString()} | Room: ${record.roomNo}`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -3859,7 +3891,7 @@ app.get(
                       children: [
                         new TableCell({
                           children: [new Paragraph("Name")],
-                          width: { size: 25, type: WidthType.PERCENTAGE },
+                          width: { size: 20, type: WidthType.PERCENTAGE },
                         }),
                         new TableCell({
                           children: [new Paragraph("Email")],
@@ -3867,11 +3899,15 @@ app.get(
                         }),
                         new TableCell({
                           children: [new Paragraph("Roll No")],
-                          width: { size: 25, type: WidthType.PERCENTAGE },
+                          width: { size: 20, type: WidthType.PERCENTAGE },
                         }),
                         new TableCell({
                           children: [new Paragraph("Status")],
-                          width: { size: 25, type: WidthType.PERCENTAGE },
+                          width: { size: 20, type: WidthType.PERCENTAGE },
+                        }),
+                        new TableCell({
+                          children: [new Paragraph("Points")],
+                          width: { size: 15, type: WidthType.PERCENTAGE },
                         }),
                       ],
                     }),
@@ -3897,17 +3933,24 @@ app.get(
                             new TableCell({
                               children: [new Paragraph(entry.status)],
                             }),
+                            new TableCell({
+                              children: [
+                                new Paragraph(
+                                  entry.status === "present" ? "3" : "0"
+                                ),
+                              ],
+                            }),
                           ],
                         })
                     ),
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(2)}%`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -3971,6 +4014,72 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
+// Global Points Table Endpoint
+app.get('/api/points-table', authenticateToken, async (req, res) => {
+  try {
+    // Verify user authorization
+    if (!req.user.isClubMember && !req.user.isAdmin) {
+      return res.status(403).json({ error: 'Unauthorized to view points table' });
+    }
+
+    // Aggregate event attendance points (5 points per present)
+    const eventPoints = await Attendance.aggregate([
+      { $unwind: '$attendance' },
+      { $match: { 'attendance.status': 'present' } },
+      {
+        $group: {
+          _id: '$attendance.userId',
+          eventPoints: { $sum: 5 },
+        },
+      },
+      { $project: { _id: 1, eventPoints: 1 } },
+    ]);
+
+    // Aggregate practice attendance points (3 points per present)
+    const practicePoints = await PracticeAttendance.aggregate([
+      { $unwind: '$attendance' },
+      { $match: { 'attendance.status': 'present' } },
+      {
+        $group: {
+          _id: '$attendance.userId',
+          practicePoints: { $sum: 3 },
+        },
+      },
+      { $project: { _id: 1, practicePoints: 1 } },
+    ]);
+
+    // Fetch all users with relevant fields
+    const users = await User.find({}, 'name email rollNo').lean();
+
+    // Combine points and user details
+    const pointsTable = users.map((user) => {
+      const eventUserPoints = eventPoints.find((ep) => ep._id.toString() === user._id.toString())?.eventPoints || 0;
+      const practiceUserPoints = practicePoints.find((pp) => pp._id.toString() === user._id.toString())?.practicePoints || 0;
+      return {
+        userId: user._id.toString(),
+        name: user.name || 'Unknown',
+        email: user.email || 'N/A',
+        rollNo: user.rollNo || 'N/A',
+        totalPoints: eventUserPoints + practiceUserPoints,
+      };
+    });
+
+    // Sort by totalPoints in descending order
+    pointsTable.sort((a, b) => b.totalPoints - a.totalPoints);
+
+    // Log successful response
+    console.log(`Global points table fetched, records: ${pointsTable.length}`);
+
+    res.status(200).json(pointsTable);
+  } catch (err) {
+    console.error('Global points table error:', {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?._id,
+    });
+    res.status(500).json({ error: 'Server error fetching points table' });
+  }
+});
 // Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
