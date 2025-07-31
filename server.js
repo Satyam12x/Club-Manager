@@ -1160,7 +1160,9 @@ app.post(
         .json({ error: "Name, description, category, and icon are required" });
     }
     if (
-      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)
+      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
+        category
+      )
     ) {
       return res.status(400).json({ error: "Invalid category" });
     }
@@ -1258,7 +1260,9 @@ app.post(
         return res.status(400).json({ error: "Club name already exists" });
       }
       if (err.name === "ValidationError") {
-        return res.status(400).json({ error: `Validation error: ${err.message}` });
+        return res
+          .status(400)
+          .json({ error: `Validation error: ${err.message}` });
       }
       res.status(500).json({ error: "Server error" });
     }
@@ -1980,13 +1984,14 @@ app.post(
     }
 
     try {
-      if (!mongoose.isValidObjectId(club)) {
-        return res.status(400).json({ error: "Invalid club ID" });
-      }
-
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
         return res.status(404).json({ error: "Club not found" });
+      }
+
+      let bannerUrl = null;
+      if (req.file) {
+        bannerUrl = await uploadToCloudinary(req.file.buffer);
       }
 
       const event = new Event({
@@ -1996,7 +2001,7 @@ app.post(
         time,
         location,
         club,
-        banner: req.file ? req.file.path : null,
+        banner: bannerUrl,
         createdBy: req.user.id,
         category,
       });
@@ -2005,28 +2010,14 @@ app.post(
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
       await clubDoc.save();
 
-      const members = await User.find({ _id: { $in: clubDoc.members } });
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `New ${category.toLowerCase()} "${title}" created for ${
-            clubDoc.name
-          } on ${date}.`,
-          type: "event",
-        });
-      }
-
       const transformedEvent = {
         ...event._doc,
-        banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
+        banner: event.banner || null,
       };
       res.status(201).json(transformedEvent);
     } catch (err) {
-      console.error("Event creation error:", {
-        message: err.message,
-        stack: err.stack,
-      });
-      res.status(500).json({ error: "Server error in event creation" });
+      console.error("Event creation error:", err);
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
@@ -2042,7 +2033,7 @@ app.get("/api/events", authenticateToken, async (req, res) => {
       .populate("registeredUsers.userId", "name email rollNo isACEMStudent");
     const transformedEvents = events.map((event) => ({
       ...event._doc,
-      banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
+      banner: event.banner || null,
     }));
     res.json(transformedEvents);
   } catch (err) {
@@ -2070,7 +2061,7 @@ app.get("/api/events/:id", authenticateToken, async (req, res) => {
     }
     const transformedEvent = {
       ...event._doc,
-      banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
+      banner: event.banner || null,
     };
     res.json(transformedEvent);
   } catch (err) {
@@ -2111,13 +2102,6 @@ app.put(
     }
 
     try {
-      if (!mongoose.isValidObjectId(id)) {
-        return res.status(400).json({ error: "Invalid event ID" });
-      }
-      if (!mongoose.isValidObjectId(club)) {
-        return res.status(400).json({ error: "Invalid club ID" });
-      }
-
       const event = await Event.findById(id);
       if (!event) {
         return res.status(404).json({ error: "Event not found" });
@@ -2128,16 +2112,13 @@ app.put(
         return res.status(404).json({ error: "Club not found" });
       }
 
-      if (req.file && event.banner) {
-        try {
-          await fs.access(event.banner);
-          await fs.unlink(event.banner);
-        } catch (err) {
-          console.warn("Failed to delete old event banner:", {
-            message: err.message,
-            path: event.banner,
-          });
+      let bannerUrl = event.banner;
+      if (req.file) {
+        if (event.banner) {
+          const publicId = event.banner.split("/").pop().split(".")[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
         }
+        bannerUrl = await uploadToCloudinary(req.file.buffer);
       }
 
       event.title = title;
@@ -2146,37 +2127,24 @@ app.put(
       event.time = time;
       event.location = location;
       event.club = club;
-      event.banner = req.file ? req.file.path : event.banner;
+      event.banner = bannerUrl;
       event.category = category;
       await event.save();
 
-      const members = await User.find({ _id: { $in: clubDoc.members } });
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `${category} "${title}" for ${clubDoc.name} has been updated.`,
-          type: "event",
-        });
-      }
-
       const transformedEvent = {
         ...event._doc,
-        banner: event.banner ? `http://localhost:5000/${event.banner}` : null,
+        banner: event.banner || null,
       };
       res.json({
         message: "Event updated successfully",
         event: transformedEvent,
       });
     } catch (err) {
-      console.error("Event update error:", {
-        message: err.message,
-        stack: err.stack,
-      });
-      res.status(500).json({ error: "Server error in event update" });
+      console.error("Event update error:", err);
+      res.status(500).json({ error: "Server error" });
     }
   }
 );
-
 // Delete Event (Creator, Super Admin, or Head Coordinator only)
 app.delete(
   "/api/events/:id",
