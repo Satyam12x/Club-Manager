@@ -243,7 +243,7 @@ const Attendance = mongoose.model("Attendance", attendanceSchema);
 const practiceAttendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   title: { type: String, required: true },
-  date: { type: String, required: true },
+  date: { type: Date, required: true }, // Changed to Date type
   roomNo: { type: String, required: true },
   attendance: [
     {
@@ -268,8 +268,50 @@ const practiceAttendanceSchema = new mongoose.Schema({
   },
   createdAt: { type: Date, default: Date.now },
 });
+practiceAttendanceSchema.index(
+  { club: 1, title: 1, date: 1, roomNo: 1 },
+  { unique: true }
+);
+const PracticeAttendance = mongoose.model(
+  "PracticeAttendance",
+  practiceAttendanceSchema
+);
 
-const PracticeAttendance = mongoose.model("PracticeAttendance", practiceAttendanceSchema);
+const isValidDate = (dateString) => {
+  return !isNaN(new Date(dateString).getTime());
+};
+
+const contactMessageSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true },
+  message: { type: String, required: true },
+  club: { type: String },
+  status: {
+    type: String,
+    enum: ["new", "read", "replied", "archived"],
+    default: "new",
+  },
+  priority: {
+    type: String,
+    enum: ["low", "medium", "high"],
+    default: "low",
+  },
+  isStarred: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+  replies: [
+    {
+      reply: { type: String, required: true },
+      repliedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+      },
+      repliedAt: { type: Date, default: Date.now },
+    },
+  ],
+});
+
+const ContactMessage = mongoose.model("ContactMessage", contactMessageSchema);
 
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
