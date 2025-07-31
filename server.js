@@ -205,7 +205,10 @@ const membershipRequestSchema = new mongoose.Schema({
   requestedAt: { type: Date, default: Date.now },
 });
 
-const MembershipRequest = mongoose.model("MembershipRequest", membershipRequestSchema);
+const MembershipRequest = mongoose.model(
+  "MembershipRequest",
+  membershipRequestSchema
+);
 
 const attendanceSchema = new mongoose.Schema({
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
