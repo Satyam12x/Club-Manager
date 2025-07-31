@@ -951,8 +951,8 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
           ...club,
           memberCount,
           eventsCount,
-          icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
-          banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
+          icon: club.icon || null,
+          banner: club.banner || null,
         };
       })
     );
@@ -1600,8 +1600,8 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
     }
     const transformedClub = {
       ...club._doc,
-      icon: club.icon ? `http://localhost:5000/${club.icon}` : null,
-      banner: club.banner ? `http://localhost:5000/${club.banner}` : null,
+      icon: club.icon || null,
+      banner: club.banner || null,
       memberCount: club.members.length,
     };
     res.json(transformedClub);
