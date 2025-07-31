@@ -4017,11 +4017,6 @@ app.use((err, req, res, next) => {
 // Global Points Table Endpoint
 app.get('/api/points-table', authenticateToken, async (req, res) => {
   try {
-    // Verify user authorization
-    if (!req.user.isClubMember && !req.user.isAdmin) {
-      return res.status(403).json({ error: 'Unauthorized to view points table' });
-    }
-
     // Aggregate event attendance points (5 points per present)
     const eventPoints = await Attendance.aggregate([
       { $unwind: '$attendance' },
@@ -4048,8 +4043,8 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
       { $project: { _id: 1, practicePoints: 1 } },
     ]);
 
-    // Fetch all users with relevant fields
-    const users = await User.find({}, 'name email rollNo').lean();
+    // Fetch all users with relevant fields, including clubName and avatar
+    const users = await User.find({}, 'name email rollNo clubName avatar').lean();
 
     // Combine points and user details
     const pointsTable = users.map((user) => {
@@ -4060,7 +4055,9 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
         name: user.name || 'Unknown',
         email: user.email || 'N/A',
         rollNo: user.rollNo || 'N/A',
+        clubName: Array.isArray(user.clubName) ? user.clubName : user.clubName ? [user.clubName] : [], // Ensure clubName is an array
         totalPoints: eventUserPoints + practiceUserPoints,
+        avatar: user.avatar || 'https://via.placeholder.com/60/60'
       };
     });
 
