@@ -364,7 +364,10 @@ const isAdmin = async (req, res, next) => {
     }
     next();
   } catch (err) {
-    console.error("Admin check error:", { message: err.message, stack: err.stack });
+    console.error("Admin check error:", {
+      message: err.message,
+      stack: err.stack,
+    });
     res.status(500).json({ error: "Server error in admin check" });
   }
 };
@@ -402,7 +405,11 @@ const isSuperAdmin = async (req, res, next) => {
           isCreator: club.creator?.toString() === user._id.toString(),
         }
       );
-      return res.status(403).json({ error: "You are not authorized to perform this action on this club" });
+      return res
+        .status(403)
+        .json({
+          error: "You are not authorized to perform this action on this club",
+        });
     }
     next();
   } catch (err) {
