@@ -65,7 +65,7 @@ mongoose
 // Schemas
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true },
   mobile: { type: String, unique: true, sparse: true },
   rollNo: { type: String, unique: true, sparse: true },
@@ -83,8 +83,11 @@ const userSchema = new mongoose.Schema({
   isACEMStudent: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
   clubs: [{ type: mongoose.Schema.Types.ObjectId, ref: "Club", default: [] }],
+  resetPasswordOtp: { type: String }, // Added for OTP storage
+  resetPasswordExpires: { type: Number }, // Added for OTP expiration timestamp
 });
 
+// Pre-save middleware to hash password
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   const salt = await bcrypt.genSalt(10);
@@ -92,6 +95,7 @@ userSchema.pre("save", async function (next) {
   next();
 });
 
+// Method to compare passwords
 userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
@@ -721,6 +725,129 @@ app.post("/api/auth/verify-otp-login", async (req, res) => {
     }
   );
   res.json({ token });
+});
+
+// Send Password Reset OTP
+app.post("/api/auth/reset-password-otp-request", async (req, res) => {
+  const { email } = req.body;
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: "Invalid email address" });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    if (!user) {
+      console.log(`No user found for email: ${email}`);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const resetOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.resetPasswordOtp = resetOtp;
+    user.resetPasswordExpires = Date.now() + 3600000; // 1 hour expiry
+    await user.save();
+    console.log(`OTP generated for ${email}: ${resetOtp}, Expires: ${new Date(user.resetPasswordExpires)}`);
+
+    await transporter.sendMail({
+      from: `"ACEM" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "ACEM Password Reset OTP",
+      text: `Your OTP for password reset is: ${resetOtp}\nThis OTP is valid for 1 hour.\nIf you did not request this, please ignore this email.`,
+      html: `<p>Your OTP for password reset is: <strong>${resetOtp}</strong></p>
+             <p>This OTP is valid for 1 hour.</p>
+             <p>If you did not request this, please ignore this email.</p>`,
+    });
+
+    console.log(`Password reset OTP sent to ${email}`);
+    res.json({ message: "Password reset OTP sent successfully" });
+  } catch (err) {
+    console.error("Password reset OTP request error:", {
+      message: err.message,
+      stack: err.stack,
+      email,
+    });
+    res.status(500).json({ error: "Failed to send password reset OTP" });
+  }
+});
+
+// Verify Reset OTP
+app.post("/api/auth/verify-reset-otp", async (req, res) => {
+  const { email, otp } = req.body;
+  if (!email || !otp) {
+    console.log(`Missing email or OTP: email=${email}, otp=${otp}`);
+    return res.status(400).json({ error: "Email and OTP are required" });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    if (!user) {
+      console.log(`No user found for email: ${email}`);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    console.log(`Verifying OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp}, expires=${user.resetPasswordExpires}, now=${Date.now()}`);
+    if (user.resetPasswordOtp !== otp || user.resetPasswordExpires < Date.now()) {
+      console.log(`OTP verification failed: provided=${otp}, stored=${user.resetPasswordOtp}, expired=${user.resetPasswordExpires < Date.now()}`);
+      return res.status(400).json({ error: "Invalid or expired OTP" });
+    }
+
+    res.json({ message: "OTP verified successfully", email: user.email });
+  } catch (err) {
+    console.error("Reset OTP verification error:", {
+      message: err.message,
+      stack: err.stack,
+      email,
+      otp,
+    });
+    res.status(500).json({ error: "Failed to verify OTP" });
+  }
+});
+
+// Reset Password
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+  if (!email || !otp || !newPassword) {
+    console.log(`Missing fields: email=${email}, otp=${otp}, newPassword=${newPassword ? '[provided]' : 'missing'}`);
+    return res.status(400).json({ error: "Email, OTP, and new password are required" });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: "Password must be at least 6 characters" });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    if (!user) {
+      console.log(`No user found for email: ${email}`);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    console.log(`Resetting password for ${email}: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp}, expires=${user.resetPasswordExpires}, now=${Date.now()}`);
+    if (user.resetPasswordOtp !== otp || user.resetPasswordExpires < Date.now()) {
+      console.log(`Password reset failed: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp}, expired=${user.resetPasswordExpires < Date.now()}`);
+      return res.status(400).json({ error: "Invalid or expired OTP" });
+    }
+
+    user.password = newPassword; // bcrypt hashing handled by pre-save middleware
+    user.resetPasswordOtp = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    await transporter.sendMail({
+      from: `"ACEM" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: "ACEM Password Reset Successful",
+      text: `Your password has been successfully reset. If you did not perform this action, please contact support immediately.`,
+    });
+
+    console.log(`Password reset successfully for ${email}`);
+    res.json({ message: "Password reset successfully" });
+  } catch (err) {
+    console.error("Password reset error:", {
+      message: err.message,
+      stack: err.stack,
+      email,
+    });
+    res.status(500).json({ error: "Failed to reset password" });
+  }
 });
 
 // User Profile Update
@@ -1782,6 +1909,75 @@ app.delete(
     }
   }
 );
+
+app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+
+    const club = await Club.findById(id);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!user.clubs.includes(club._id) || !user.clubName.includes(club.name)) {
+      return res.status(400).json({ error: "You are not a member of this club" });
+    }
+
+    const isSuperAdmin = club.superAdmins.includes(user._id);
+    const isHeadCoordinator = user.isHeadCoordinator && user.headCoordinatorClubs.includes(club.name);
+    if (isSuperAdmin || isHeadCoordinator) {
+      return res.status(403).json({ error: "Admins and head coordinators cannot leave the club" });
+    }
+
+    user.clubs = user.clubs.filter((clubId) => clubId.toString() !== club._id.toString());
+    user.clubName = user.clubName.filter((name) => name !== club.name);
+    user.isClubMember = user.clubName.length > 0;
+    club.members = club.members.filter((memberId) => memberId.toString() !== user._id.toString());
+    club.memberCount = club.members.length;
+
+    await user.save();
+    await club.save();
+
+    await Notification.create({
+      userId: user._id,
+      message: `You have left ${club.name}.`,
+      type: "membership",
+    });
+
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    const recipients = [...club.headCoordinators, ...superAdminEmails];
+    if (recipients.length > 0) {
+      try {
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: recipients,
+          subject: `Member Left: ${club.name}`,
+          text: `User ${user.name} (${user.email}) has left ${club.name}.`,
+        });
+      } catch (err) {
+        console.error("Error sending leave notification email:", {
+          message: err.message,
+          stack: err.stack,
+        });
+      }
+    }
+
+    res.json({ message: "You have left the club successfully" });
+  } catch (err) {
+    console.error("Error leaving club:", { message: err.message, stack: err.stack });
+    res.status(500).json({ error: "Server error in leaving club" });
+  }
+});
 
 // Create Event (Creator, Super Admin, or Head Coordinator only)
 app.post(
@@ -4014,7 +4210,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-// Global Points Table Endpoint
 app.get('/api/points-table', authenticateToken, async (req, res) => {
   try {
     // Aggregate event attendance points (5 points per present)
@@ -4043,38 +4238,169 @@ app.get('/api/points-table', authenticateToken, async (req, res) => {
       { $project: { _id: 1, practicePoints: 1 } },
     ]);
 
-    // Fetch all users with relevant fields, including clubName and avatar
-    const users = await User.find({}, 'name email rollNo clubName avatar').lean();
+    // Fetch all users with relevant fields, including clubName, clubRoles, and avatar
+    const users = await User.find({}, 'name email rollNo clubName clubRoles avatar').lean();
 
-    // Combine points and user details
-    const pointsTable = users.map((user) => {
-      const eventUserPoints = eventPoints.find((ep) => ep._id.toString() === user._id.toString())?.eventPoints || 0;
-      const practiceUserPoints = practicePoints.find((pp) => pp._id.toString() === user._id.toString())?.practicePoints || 0;
-      return {
-        userId: user._id.toString(),
-        name: user.name || 'Unknown',
-        email: user.email || 'N/A',
-        rollNo: user.rollNo || 'N/A',
-        clubName: Array.isArray(user.clubName) ? user.clubName : user.clubName ? [user.clubName] : [], // Ensure clubName is an array
-        totalPoints: eventUserPoints + practiceUserPoints,
-        avatar: user.avatar || 'https://via.placeholder.com/60/60'
-      };
-    });
+    // Combine points, user details, and filter by member roles
+    const pointsTable = users
+      .map((user) => {
+        // Ensure clubName is an array
+        const clubNames = Array.isArray(user.clubName) ? user.clubName : user.clubName ? [user.clubName] : [];
+
+        // Construct clubRoles if not provided, defaulting to 'member' for each club
+        const clubRoles = user.clubRoles || clubNames.map(clubName => ({
+          clubName,
+          roles: ['member']
+        }));
+
+        // Filter clubs where the user is only a member (exclude headCoordinator, admin, superAdmin)
+        const memberClubs = clubRoles
+          .filter(clubRole => 
+            clubRole.roles.includes('member') && 
+            !clubRole.roles.includes('headCoordinator') && 
+            !clubRole.roles.includes('admin') && 
+            !clubRole.roles.includes('superAdmin')
+          )
+          .map(clubRole => clubRole.clubName);
+
+        // Skip users with no member clubs
+        if (memberClubs.length === 0) return null;
+
+        const eventUserPoints = eventPoints.find((ep) => ep._id.toString() === user._id.toString())?.eventPoints || 0;
+        const practiceUserPoints = practicePoints.find((pp) => pp._id.toString() === user._id.toString())?.practicePoints || 0;
+
+        return {
+          userId: user._id.toString(),
+          name: user.name || 'Unknown',
+          email: user.email || 'N/A',
+          rollNo: user.rollNo || 'N/A',
+          clubName: memberClubs,
+          clubRoles: clubRoles.map(role => ({
+            clubName: role.clubName,
+            roles: Array.isArray(role.roles) ? role.roles : [role.roles]
+          })),
+          totalPoints: eventUserPoints + practiceUserPoints,
+          avatar: user.avatar || 'https://via.placeholder.com/60/60'
+        };
+      })
+      .filter(user => user !== null); // Remove users with no member clubs
 
     // Sort by totalPoints in descending order
     pointsTable.sort((a, b) => b.totalPoints - a.totalPoints);
 
     // Log successful response
-    console.log(`Global points table fetched, records: ${pointsTable.length}`);
+    console.log(`Member points table fetched, records: ${pointsTable.length}`);
 
     res.status(200).json(pointsTable);
   } catch (err) {
-    console.error('Global points table error:', {
+    console.error('Member points table error:', {
       message: err.message,
       stack: err.stack,
       userId: req.user?._id,
     });
     res.status(500).json({ error: 'Server error fetching points table' });
+  }
+});
+
+app.patch('/api/membership-requests/:id', authenticateToken, isHeadCoordinatorOrAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status. Use "approved" or "rejected".' });
+    }
+
+    if (status === 'approved') {
+      const membershipRequest = await MembershipRequest.findById(req.params.id);
+      if (!membershipRequest) {
+        return res.status(404).json({ error: 'Membership request not found' });
+      }
+
+      const club = await Club.findOne({ clubName: membershipRequest.clubName });
+      if (!club) {
+        return res.status(404).json({ error: 'Club not found' });
+      }
+
+      const user = await User.findById(membershipRequest.userId);
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      if (club.members.some(memberId => memberId.equals(user._id))) {
+        return res.status(400).json({ error: 'User is already a member of this club' });
+      }
+
+      club.members.push(user._id);
+      await club.save();
+
+      user.clubs.push({ clubName: club.clubName, clubId: club._id });
+      await user.save();
+
+      const notification = new Notification({
+        userId: user._id,
+        message: `Your membership request for ${club.clubName} has been accepted.`,
+        type: 'membership_accepted',
+        relatedId: club._id,
+      });
+      await notification.save();
+
+      try {
+        const mailOptions = {
+          from: process.env.EMAIL_USER,
+          to: user.email,
+          subject: 'Membership Request Accepted',
+          text: `Dear ${user.name},\n\nYour membership request for ${club.clubName} has been accepted. Welcome to the club!\n\nBest regards,\nACEM Team`,
+        };
+        await transporter.sendMail(mailOptions);
+      } catch (emailErr) {
+        console.error(`Failed to send email to ${user.email}:`, emailErr);
+      }
+
+      await MembershipRequest.findByIdAndDelete(req.params.id);
+      res.json({ message: 'Membership request approved successfully' });
+    } else {
+      const membershipRequest = await MembershipRequest.findByIdAndUpdate(
+        req.params.id,
+        { status: 'rejected' },
+        { new: true }
+      );
+      if (!membershipRequest) {
+        return res.status(404).json({ error: 'Membership request not found' });
+      }
+
+      const user = await User.findById(membershipRequest.userId);
+      if (user) {
+        const notification = new Notification({
+          userId: user._id,
+          message: `Your membership request for ${membershipRequest.clubName} has been rejected.`,
+          type: 'membership_rejected',
+          relatedId: membershipRequest._id,
+        });
+        await notification.save();
+
+        try {
+          const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: user.email,
+            subject: 'Membership Request Rejected',
+            text: `Dear ${user.name},\n\nYour membership request for ${membershipRequest.clubName} has been rejected.\n\nBest regards,\nACEM Team`,
+          };
+          await transporter.sendMail(mailOptions);
+        } catch (emailErr) {
+          console.error(`Failed to send email to ${user.email}:`, emailErr);
+        }
+      }
+
+      await MembershipRequest.findByIdAndDelete(req.params.id);
+      res.json({ message: 'Membership request rejected successfully' });
+    }
+  } catch (err) {
+    console.error('Error updating membership request:', {
+      error: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      membershipRequestId: req.params.id,
+    });
+    res.status(500).json({ error: 'Server error', details: err.message });
   }
 });
 // Start Server
