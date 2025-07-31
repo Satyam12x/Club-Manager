@@ -992,9 +992,7 @@ app.post(
         .json({ error: "Name, description, category, and icon are required" });
     }
     if (
-      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-        category
-      )
+      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(category)
     ) {
       return res.status(400).json({ error: "Invalid category" });
     }
@@ -1067,6 +1065,7 @@ app.post(
         contactEmail,
         headCoordinators: validHeadCoordinators,
         superAdmins: validSuperAdmins,
+        creator: req.user.id, // Set the creator to the authenticated user's ID
         memberCount: 0,
         eventsCount: 0,
         members: [],
@@ -1075,7 +1074,8 @@ app.post(
 
       const populatedClub = await Club.findById(club._id)
         .populate("superAdmins", "name email")
-        .populate("members", "name email");
+        .populate("members", "name email")
+        .populate("creator", "name email"); // Ensure creator is populated
       const transformedClub = {
         ...populatedClub._doc,
         icon: populatedClub.icon || null,
@@ -1088,6 +1088,9 @@ app.post(
       console.error("Club creation error:", err);
       if (err.code === 11000) {
         return res.status(400).json({ error: "Club name already exists" });
+      }
+      if (err.name === "ValidationError") {
+        return res.status(400).json({ error: `Validation error: ${err.message}` });
       }
       res.status(500).json({ error: "Server error" });
     }
