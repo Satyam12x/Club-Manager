@@ -7,6 +7,9 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const path = require("path");
+const validator = require("validator");
+const { v4: uuidv4 } = require("uuid");
+const QRCode = require("qrcode");
 const fs = require("fs").promises;
 const { v2: cloudinary } = require("cloudinary");
 const streamifier = require("streamifier");
@@ -215,16 +218,12 @@ const Club = mongoose.model("Club", clubSchema);
 const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
-  date: { type: String, required: true },
+  date: { type: Date, required: true }, // Changed to Date type for consistency
   time: { type: String, required: true },
   location: { type: String, required: true },
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   banner: { type: String },
-  createdBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
-    required: true,
-  },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   registeredUsers: [
     {
       userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
@@ -239,8 +238,17 @@ const eventSchema = new mongoose.Schema({
     enum: ["Seminar", "Competition"],
     required: true,
   },
+  eventType: {
+    type: String,
+    enum: ["Intra-College", "Inter-College"],
+    required: true,
+  },
+  hasRegistrationFee: { type: Boolean, default: false },
+  acemFee: { type: Number, default: 0 },
+  nonAcemFee: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
 });
+eventSchema.index({ club: 1, date: 1 });
 
 const Event = mongoose.model("Event", eventSchema);
 
@@ -887,8 +895,7 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
     }
 
     console.log(
-      `Verifying OTP for ${email}: provided=${otp}, stored=${
-        user.resetPasswordOtp
+      `Verifying OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp
       }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
     if (
@@ -896,8 +903,7 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
       user.resetPasswordExpires < Date.now()
     ) {
       console.log(
-        `OTP verification failed: provided=${otp}, stored=${
-          user.resetPasswordOtp
+        `OTP verification failed: provided=${otp}, stored=${user.resetPasswordOtp
         }, expired=${user.resetPasswordExpires < Date.now()}`
       );
       return res.status(400).json({ error: "Invalid or expired OTP" });
@@ -920,8 +926,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   const { email, otp, newPassword } = req.body;
   if (!email || !otp || !newPassword) {
     console.log(
-      `Missing fields: email=${email}, otp=${otp}, newPassword=${
-        newPassword ? "[provided]" : "missing"
+      `Missing fields: email=${email}, otp=${otp}, newPassword=${newPassword ? "[provided]" : "missing"
       }`
     );
     return res
@@ -942,8 +947,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
     }
 
     console.log(
-      `Resetting password for ${email}: provided OTP=${otp}, stored OTP=${
-        user.resetPasswordOtp
+      `Resetting password for ${email}: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp
       }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
     if (
@@ -951,8 +955,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
       user.resetPasswordExpires < Date.now()
     ) {
       console.log(
-        `Password reset failed: provided OTP=${otp}, stored OTP=${
-          user.resetPasswordOtp
+        `Password reset failed: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp
         }, expired=${user.resetPasswordExpires < Date.now()}`
       );
       return res.status(400).json({ error: "Invalid or expired OTP" });
@@ -1505,9 +1508,9 @@ app.patch(
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-              .split(",")
-              .map((email) => email.trim())
-              .filter((email) => email)
+            .split(",")
+            .map((email) => email.trim())
+            .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
@@ -1553,9 +1556,9 @@ app.patch(
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
           ? superAdmins
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id)
+            .split(",")
+            .map((id) => id.trim())
+            .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
@@ -2143,32 +2146,78 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
 app.post(
   "/api/events",
   authenticateToken,
-  isSuperAdmin,
+  isHeadCoordinatorOrAdmin,
   upload.single("banner"),
   async (req, res) => {
-    const { title, description, date, time, location, club, category } =
-      req.body;
-    if (
-      !title ||
-      !description ||
-      !date ||
-      !time ||
-      !location ||
-      !club ||
-      !category
-    ) {
-      return res
-        .status(400)
-        .json({ error: "All fields including category are required" });
-    }
-    if (!["Seminar", "Competition"].includes(category)) {
-      return res.status(400).json({ error: "Invalid event category" });
-    }
-
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
-      const clubDoc = await Club.findById(club);
-      if (!clubDoc) {
-        return res.status(404).json({ error: "Club not found" });
+      const {
+        title,
+        description,
+        date,
+        time,
+        location,
+        club,
+        category,
+        eventType,
+        hasRegistrationFee,
+        acemFee,
+        nonAcemFee,
+      } = req.body;
+
+      if (
+        !title ||
+        !description ||
+        !date ||
+        !time ||
+        !location ||
+        !club ||
+        !category ||
+        !eventType
+      ) {
+        return res.status(400).json({ error: "All required fields must be provided" });
+      }
+
+      if (!["Seminar", "Competition"].includes(category)) {
+        return res.status(400).json({ error: "Invalid event category" });
+      }
+
+      if (!["Intra-College", "Inter-College"].includes(eventType)) {
+        return res.status(400).json({ error: "Invalid event type" });
+      }
+
+      if (eventType === "Inter-College" && hasRegistrationFee === "true") {
+        if (
+          !acemFee ||
+          !nonAcemFee ||
+          isNaN(acemFee) ||
+          isNaN(nonAcemFee) ||
+          parseFloat(acemFee) < 0 ||
+          parseFloat(nonAcemFee) < 0
+        ) {
+          return res.status(400).json({
+            error: "Valid registration fees are required for Inter-College events",
+          });
+        }
+      }
+
+      const user = await User.findById(req.user.id).session(session);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const clubDoc = await Club.findById(club).session(session);
+      if (!clubDoc) return res.status(404).json({ error: "Club not found" });
+
+      const isAuthorized =
+        user.isAdmin ||
+        clubDoc.creator.equals(req.user.id) ||
+        clubDoc.superAdmins.some((admin) => admin.equals(req.user.id)) ||
+        user.headCoordinatorClubs.includes(clubDoc.name);
+
+      if (!isAuthorized) {
+        return res.status(403).json({
+          error: "Not authorized to create events for this club",
+        });
       }
 
       let bannerUrl = null;
@@ -2179,27 +2228,45 @@ app.post(
       const event = new Event({
         title,
         description,
-        date,
+        date: new Date(date),
         time,
         location,
         club,
         banner: bannerUrl,
         createdBy: req.user.id,
         category,
+        eventType,
+        hasRegistrationFee: eventType === "Inter-College" ? hasRegistrationFee === "true" : false,
+        acemFee: hasRegistrationFee === "true" ? parseFloat(acemFee) : 0,
+        nonAcemFee: hasRegistrationFee === "true" ? parseFloat(nonAcemFee) : 0,
       });
-      await event.save();
+
+      await event.save({ session });
 
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
-      await clubDoc.save();
+      await clubDoc.save({ session });
 
+      await Notification.create(
+        {
+          userId: req.user.id,
+          message: `Event "${title}" created successfully for ${clubDoc.name}.`,
+          type: "event",
+        },
+        { session }
+      );
+
+      await session.commitTransaction();
       const transformedEvent = {
         ...event._doc,
         banner: event.banner || null,
       };
-      res.status(201).json(transformedEvent);
+      res.status(201).json({ message: "Event created successfully", event: transformedEvent });
     } catch (err) {
-      console.error("Event creation error:", err);
-      res.status(500).json({ error: "Server error" });
+      await session.abortTransaction();
+      console.error("Event creation error:", { message: err.message, stack: err.stack });
+      res.status(500).json({ error: `Server error: ${err.message}` });
+    } finally {
+      session.endSession();
     }
   }
 );
@@ -2328,78 +2395,221 @@ app.put(
   }
 );
 // Delete Event (Creator, Super Admin, or Head Coordinator only)
-app.delete(
-  "/api/events/:id",
-  authenticateToken,
-  isSuperAdmin,
-  async (req, res) => {
-    try {
-      if (!mongoose.isValidObjectId(req.params.id)) {
-        return res.status(400).json({ error: "Invalid event ID" });
-      }
+app.post('/api/events/:id/register', authenticateToken, async (req, res) => {
+  const session = await mongoose.startSession();
+  console.log('Starting registration for event:', req.params.id, 'User:', req.user?.id);
+  session.startTransaction();
+  try {
+    const { name, email, rollNo, isACEMStudent } = req.body;
+    console.log('Received payload:', { name, email, rollNo, isACEMStudent });
 
-      const event = await Event.findById(req.params.id);
-      if (!event) {
-        return res.status(404).json({ error: "Event not found" });
-      }
-
-      const club = await Club.findById(event.club);
-      if (!club) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-
-      if (event.banner) {
-        try {
-          await fs.access(event.banner);
-          await fs.unlink(event.banner);
-        } catch (err) {
-          console.warn("Failed to delete event banner:", {
-            message: err.message,
-            path: event.banner,
-          });
-        }
-      }
-
-      await event.deleteOne();
-
-      club.eventsCount = await Event.countDocuments({ club: club._id });
-      await club.save();
-
-      const members = await User.find({ _id: { $in: club.members } });
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `${event.category} "${event.title}" for ${club.name} has been deleted.`,
-          type: "event",
-        });
-      }
-
-      res.json({ message: "Event deleted successfully" });
-    } catch (err) {
-      console.error("Event deletion error:", {
-        message: err.message,
-        stack: err.stack,
-      });
-      res.status(500).json({ error: "Server error in event deletion" });
+    // Validate input
+    if (!name || !email || isACEMStudent === undefined) {
+      console.error('Validation failed: Missing required fields', { name, email, isACEMStudent });
+      return res.status(400).json({ error: 'Name, email, and ACEM student status are required' });
     }
+
+    if (isACEMStudent && !rollNo) {
+      console.error('Validation failed: Roll number required for ACEM students', { rollNo });
+      return res.status(400).json({ error: 'Roll number is required for ACEM students' });
+    }
+
+    if (!validator.isEmail(email)) {
+      console.error('Validation failed: Invalid email', { email });
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      console.error('Validation failed: Invalid event ID', { eventId: req.params.id });
+      return res.status(400).json({ error: 'Invalid event ID' });
+    }
+
+    // Fetch event
+    console.log('Fetching event:', req.params.id);
+    const event = await Event.findById(req.params.id).populate('club').session(session);
+    if (!event) {
+      console.error('Event not found:', req.params.id);
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    if (!event.club || !mongoose.isValidObjectId(event.club._id)) {
+      console.error('Club not found or invalid for event:', req.params.id, { club: event.club });
+      return res.status(400).json({ error: 'Invalid club reference for this event' });
+    }
+
+    // Fetch user
+    console.log('Fetching user:', req.user.id);
+    const user = await User.findById(req.user.id).session(session);
+    if (!user) {
+      console.error('User not found:', req.user.id);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check for duplicate registration
+    if (!Array.isArray(event.registeredUsers)) {
+      event.registeredUsers = [];
+    }
+    if (event.registeredUsers.some((reg) => reg.userId.toString() === req.user.id)) {
+      console.error('Duplicate registration for user:', req.user.id, 'Event:', req.params.id);
+      return res.status(400).json({ error: 'User already registered for this event' });
+    }
+
+    // Check event type restriction
+    if (event.eventType === 'Intra-College' && !isACEMStudent) {
+      console.error('Intra-College restriction violated for user:', req.user.id);
+      return res.status(403).json({ error: 'Only ACEM students can register for Intra-College events' });
+    }
+
+    // Handle payment (simulated)
+    let paymentStatus = 'not_required';
+    let transactionId = null;
+    if (event.eventType === 'Inter-College' && event.hasRegistrationFee) {
+      const amount = isACEMStudent ? event.acemFee : event.nonAcemFee;
+      transactionId = `TXN_${uuidv4()}`;
+      paymentStatus = 'success'; // Simulate successful payment
+      if (paymentStatus !== 'success') {
+        console.error('Payment failed for event:', event._id);
+        return res.status(400).json({ error: 'Payment failed' });
+      }
+    }
+
+    // Use rollNo from request or user
+    const effectiveRollNo = isACEMStudent ? rollNo || user.rollNo : null;
+
+    // Handle club membership for ACEM students
+    if (isACEMStudent) {
+      console.log('Checking club membership for club:', event.club._id);
+      const club = await Club.findById(event.club._id).session(session);
+      if (!club) {
+        console.error('Club not found:', event.club._id);
+        return res.status(400).json({ error: 'Club not found' });
+      }
+      if (!club.members.includes(req.user.id)) {
+        console.log('Adding user to club:', club._id);
+        club.members = club.members || [];
+        club.members.push(req.user.id);
+        club.memberCount = await User.countDocuments({ clubName: club.name });
+        await club.save({ session });
+        user.clubName = [...new Set([...(user.clubName || []), club.name])];
+        user.clubs = [...new Set([...(user.clubs || []), club._id])];
+        user.isClubMember = true;
+        await user.save({ session });
+      }
+    }
+
+    // Register user
+    console.log('Registering user for event:', event._id);
+    event.registeredUsers.push({
+      userId: req.user.id,
+      name,
+      email,
+      rollNo: effectiveRollNo,
+      isACEMStudent,
+    });
+    await event.save({ session });
+
+    // Generate QR code for non-ACEM Inter-College events
+    let qrCode = null;
+    if (!isACEMStudent && event.eventType === 'Inter-College') {
+      console.log('Generating QR code for user:', req.user.id);
+      const qrData = JSON.stringify({
+        userId: req.user.id,
+        eventId: event._id,
+        transactionId: transactionId || uuidv4(),
+        eventTitle: event.title,
+        userName: name,
+      });
+      try {
+        qrCode = await QRCode.toDataURL(qrData);
+      } catch (qrError) {
+        console.error('QR code generation failed:', {
+          message: qrError.message,
+          stack: qrError.stack,
+        });
+        throw new Error('Failed to generate QR code');
+      }
+    }
+
+    // Create notification
+    console.log('Creating notification for user:', req.user.id);
+    await Notification.create(
+      [{
+        userId: req.user.id,
+        message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title}" in ${event.club.name}.`,
+        type: 'event',
+      }],
+      { session }
+    );
+
+    // Send email with QR code
+    if (qrCode) {
+      console.log('Sending email with QR code to:', email);
+      try {
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: `Registration Confirmation for ${event.title}`,
+          html: `
+              <h3>Registration Successful</h3>
+              <p>Thank you for registering for ${event.title}!</p>
+              <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
+              <p>Event Time: ${event.time}</p>
+              <p>Location: ${event.location}</p>
+              ${event.hasRegistrationFee ? `<p>Payment Amount: ${isACEMStudent ? event.acemFee : event.nonAcemFee} INR</p>` : ''}
+              <p>Scan the QR code below to verify your registration:</p>
+              <img src="${qrCode}" alt="Registration QR Code" />
+            `,
+        });
+      } catch (emailError) {
+        console.error('Email sending failed:', {
+          message: emailError.message,
+          stack: emailError.stack,
+        });
+        throw new Error('Failed to send registration email');
+      }
+    }
+
+    await session.commitTransaction();
+    console.log('Registration successful for event:', event._id, 'User:', req.user.id);
+    res.json({
+      message: isACEMStudent
+        ? 'Successfully joined the club and registered for the event'
+        : 'Registration successful',
+      qrCode,
+      paymentStatus,
+      transactionId,
+    });
+  } catch (err) {
+    console.error('Error in registration route:', {
+      message: err.message,
+      stack: err.stack,
+      code: err.code,
+      eventId: req.params.id,
+      userId: req.user?.id,
+    });
+    await session.abortTransaction();
+    res.status(500).json({ error: `Server error: ${err.message}` });
+  } finally {
+    session.endSession();
   }
-);
+});
 
 // Register for Event
 app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
     const { name, email, rollNo, isACEMStudent } = req.body;
+
     if (!name || !email || isACEMStudent === undefined) {
-      return res
-        .status(400)
-        .json({ error: "Name, email, and ACEM student status are required" });
+      return res.status(400).json({ error: "Name, email, and ACEM student status are required" });
     }
+
     if (isACEMStudent && !rollNo) {
-      return res
-        .status(400)
-        .json({ error: "Roll number is required for ACEM students" });
+      return res.status(400).json({ error: "Roll number is required for ACEM students" });
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+
+    if (!validator.isEmail(email)) {
       return res.status(400).json({ error: "Invalid email address" });
     }
 
@@ -2407,25 +2617,50 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "Invalid event ID" });
     }
 
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findById(req.params.id).populate("club").session(session);
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
     }
 
     const userId = req.user.id;
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).session(session);
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
     if (event.registeredUsers.some((reg) => reg.userId.toString() === userId)) {
-      return res
-        .status(400)
-        .json({ error: "User already registered for this event" });
+      return res.status(400).json({ error: "User already registered for this event" });
     }
 
-    // Use rollNo from user profile if not provided for ACEM students
+    if (event.eventType === "Intra-College" && !isACEMStudent) {
+      return res.status(403).json({ error: "Only ACEM students can register for Intra-College events" });
+    }
+
+    let paymentStatus = "not_required";
+    let transactionId = null;
+    if (event.eventType === "Inter-College" && event.hasRegistrationFee) {
+      const amount = isACEMStudent ? event.acemFee : event.nonAcemFee;
+      transactionId = `TXN_${uuidv4()}`;
+      paymentStatus = "success"; // Simulate successful payment (replace with real gateway)
+      if (paymentStatus !== "success") {
+        return res.status(400).json({ error: "Payment failed" });
+      }
+    }
+
     const effectiveRollNo = isACEMStudent ? rollNo || user.rollNo : null;
+
+    if (isACEMStudent) {
+      const club = await Club.findById(event.club._id).session(session);
+      if (!club.members.includes(userId)) {
+        club.members.push(userId);
+        club.memberCount = await User.countDocuments({ clubName: club.name });
+        await club.save({ session });
+        user.clubName = [...new Set([...user.clubName, club.name])];
+        user.clubs = [...new Set([...user.clubs, club._id])];
+        user.isClubMember = true;
+        await user.save({ session });
+      }
+    }
 
     event.registeredUsers.push({
       userId,
@@ -2434,27 +2669,65 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
       rollNo: effectiveRollNo,
       isACEMStudent,
     });
-    await event.save();
+    await event.save({ session });
 
-    const club = await Club.findById(event.club);
-    await Notification.create({
-      userId,
-      message: `You have successfully registered for the ${event.category.toLowerCase()} "${
-        event.title
-      }" in ${club.name}.`,
-      type: "event",
+    let qrCode = null;
+    if (!isACEMStudent && event.eventType === "Inter-College") {
+      const qrData = JSON.stringify({
+        userId,
+        eventId: event._id,
+        transactionId: transactionId || uuidv4(),
+        eventTitle: event.title,
+        userName: name,
+      });
+      qrCode = await QRCode.toDataURL(qrData);
+    }
+
+    await Notification.create(
+      {
+        userId,
+        message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title}" in ${event.club.name}.`,
+        type: "event",
+      },
+      { session }
+    );
+
+    if (qrCode) {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: `Registration Confirmation for ${event.title}`,
+        html: `
+          <h3>Registration Successful</h3>
+          <p>Thank you for registering for ${event.title}!</p>
+          <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
+          <p>Event Time: ${event.time}</p>
+          <p>Location: ${event.location}</p>
+          ${event.hasRegistrationFee ? `<p>Payment Amount: ${isACEMStudent ? event.acemFee : event.nonAcemFee} INR</p>` : ""}
+          <p>Scan the QR code below to verify your registration:</p>
+          <img src="${qrCode}" alt="Registration QR Code" />
+        `,
+      });
+    }
+
+    await session.commitTransaction();
+    res.json({
+      message: isACEMStudent
+        ? "Successfully joined the club and registered for the event"
+        : "Registration successful",
+      qrCode,
+      paymentStatus,
+      transactionId,
     });
-
-    res.json({ message: "Successfully registered for the event" });
   } catch (err) {
-    console.error("Error registering for event:", {
-      message: err.message,
-      stack: err.stack,
-    });
+    await session.abortTransaction();
+    console.error("Error registering for event:", { message: err.message, stack: err.stack });
     if (err.code === 11000) {
       return res.status(400).json({ error: "Duplicate registration details" });
     }
-    res.status(500).json({ error: "Server error in event registration" });
+    res.status(500).json({ error: `Server error: ${err.message}` });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -3021,11 +3294,9 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${
-            eventDoc.title
-          }" on ${date} has been marked as ${entry.status} (${
-            entry.status === "present" ? "5 points" : "0 points"
-          }).`,
+          message: `Your attendance for "${eventDoc.title
+            }" on ${date} has been marked as ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"
+            }).`,
           type: "attendance",
         });
       }
@@ -3177,11 +3448,9 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${event.title}" on ${
-            attendanceRecord.date.toISOString().split("T")[0]
-          } has been updated to ${entry.status} (${
-            entry.status === "present" ? "5 points" : "0 points"
-          }).`,
+          message: `Your attendance for "${event.title}" on ${attendanceRecord.date.toISOString().split("T")[0]
+            } has been updated to ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"
+            }).`,
           type: "attendance",
         });
       }
@@ -3349,13 +3618,11 @@ app.post(
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: user.email,
           subject: `Added to ${club.name}`,
-          text: `You have been added to ${
-            club.name
-          } as a member. Please log in to the ACEM platform to view details${
-            user.password
+          text: `You have been added to ${club.name
+            } as a member. Please log in to the ACEM platform to view details${user.password
               ? ". Your temporary password is 'defaultPassword123'. Please reset it upon login."
               : "."
-          }`,
+            }`,
         });
       } catch (emailErr) {
         console.error("Error sending email to new member:", {
@@ -3514,11 +3781,9 @@ app.get(
                 ],
               }),
               new Paragraph({
-                text: `Stats: Present: ${
-                  attendanceRecord.stats?.presentCount || 0
-                }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${
-                  attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
-                }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
+                text: `Stats: Present: ${attendanceRecord.stats?.presentCount || 0
+                  }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
+                  }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
                 spacing: { after: 200 },
               }),
             ],
@@ -3735,9 +4000,8 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${
-            entry.status
-          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${entry.status
+            } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -4049,9 +4313,8 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${
-            entry.status
-          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${entry.status
+            } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -4131,13 +4394,12 @@ app.get(
               }),
               ...(startDate || endDate
                 ? [
-                    new Paragraph({
-                      text: `Date Range: ${startDate || "N/A"} to ${
-                        endDate || "N/A"
+                  new Paragraph({
+                    text: `Date Range: ${startDate || "N/A"} to ${endDate || "N/A"
                       }`,
-                      spacing: { after: 200 },
-                    }),
-                  ]
+                    spacing: { after: 200 },
+                  }),
+                ]
                 : []),
               new Paragraph({
                 text: "Event Attendance",
@@ -4146,9 +4408,8 @@ app.get(
               }),
               ...eventAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Event: ${
-                    record.event.title
-                  } | Date: ${record.date.toLocaleDateString()}`,
+                  text: `Event: ${record.event.title
+                    } | Date: ${record.date.toLocaleDateString()}`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -4213,13 +4474,11 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(
-                    2
-                  )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -4230,11 +4489,9 @@ app.get(
               }),
               ...practiceAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Practice: ${
-                    record.title
-                  } | Date: ${record.date.toLocaleDateString()} | Room: ${
-                    record.roomNo
-                  }`,
+                  text: `Practice: ${record.title
+                    } | Date: ${record.date.toLocaleDateString()} | Room: ${record.roomNo
+                    }`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -4299,13 +4556,11 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(
-                    2
-                  )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -4410,8 +4665,8 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
         const clubNames = Array.isArray(user.clubName)
           ? user.clubName
           : user.clubName
-          ? [user.clubName]
-          : [];
+            ? [user.clubName]
+            : [];
 
         // Construct clubRoles if not provided, defaulting to 'member' for each club
         const clubRoles =
