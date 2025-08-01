@@ -79,51 +79,105 @@ mongoose
   .catch((err) => console.error("MongoDB connection error:", err));
 
 // Schemas
-const userSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  email: {
-    type: String,
-    required: true,
-    unique: true,
-    lowercase: true,
-    trim: true,
+const userSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: [true, "Name is required"],
+      trim: true,
+    },
+    email: {
+      type: String,
+      required: [true, "Email is required"],
+      unique: true,
+      lowercase: true,
+      trim: true,
+      match: [
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+        "Please enter a valid email address",
+      ],
+    },
+    password: {
+      type: String,
+      required: [true, "Password is required"],
+      minlength: [6, "Password must be at least 6 characters"],
+    },
+    rollNo: {
+      type: String,
+      required: false,
+      unique: true,
+      sparse: true,
+    },
+    isACEMStudent: {
+      type: Boolean,
+      required: [true, "ACEM student status is required"],
+    },
+    collegeName: {
+      type: String,
+      required: false,
+    },
+    semester: {
+      type: Number,
+      min: [1, "Semester must be between 1 and 8"],
+      max: [8, "Semester must be between 1 and 8"],
+    },
+    course: {
+      type: String,
+      enum: ["BTech", "BCA", "BBA", "MBA"],
+    },
+    specialization: {
+      type: String,
+    },
+    isClubMember: {
+      type: Boolean,
+      default: false,
+    },
+    clubName: [
+      {
+        type: String,
+      },
+    ],
+    clubs: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Club",
+      },
+    ],
+    isAdmin: {
+      type: Boolean,
+      default: false,
+    },
+    isHeadCoordinator: {
+      type: Boolean,
+      default: false,
+    },
+    headCoordinatorClubs: [
+      {
+        type: String,
+      },
+    ],
   },
-  password: { type: String, required: true },
-  mobile: { type: String, unique: true, sparse: true },
-  rollNo: { type: String, unique: true, sparse: true },
-  branch: { type: String, default: null },
-  semester: { type: Number, default: null },
-  course: { type: String, default: null },
-  specialization: { type: String, default: null },
-  phone: { type: String, default: null },
-  isClubMember: { type: Boolean, default: false },
-  clubName: { type: [String], default: [] },
-  pendingClubs: { type: [String], default: [] },
-  isAdmin: { type: Boolean, default: false },
-  isHeadCoordinator: { type: Boolean, default: false },
-  headCoordinatorClubs: { type: [String], default: [] },
-  isACEMStudent: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now },
-  clubs: [{ type: mongoose.Schema.Types.ObjectId, ref: "Club", default: [] }],
-  resetPasswordOtp: { type: String }, // Added for OTP storage
-  resetPasswordExpires: { type: Number }, // Added for OTP expiration timestamp
-});
+  {
+    timestamps: true,
+  }
+);
 
-// Pre-save middleware to hash password
+// Hash password before saving
 userSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) return next();
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
+  if (this.isModified("password")) {
+    this.password = await bcrypt.hash(this.password, 10);
+  }
   next();
 });
 
-// Method to compare passwords
+// Add comparePassword method
 userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
 const User = mongoose.model("User", userSchema);
 
+// Other schemas remain unchanged
 const clubSchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true },
   icon: { type: String, required: true },
@@ -255,7 +309,7 @@ const attendanceSchema = new mongoose.Schema({
     absentCount: { type: Number, default: 0 },
     totalMarked: { type: Number, default: 0 },
     attendanceRate: { type: Number, default: 0 },
-    totalPoints: { type: Number, default: 0 }, // New field for total points
+    totalPoints: { type: Number, default: 0 },
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -287,7 +341,7 @@ const practiceAttendanceSchema = new mongoose.Schema({
     absentCount: { type: Number, default: 0 },
     totalMarked: { type: Number, default: 0 },
     attendanceRate: { type: Number, default: 0 },
-    totalPoints: { type: Number, default: 0 }, // New field for total points
+    totalPoints: { type: Number, default: 0 },
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -340,6 +394,7 @@ const contactMessageSchema = new mongoose.Schema({
 });
 
 const ContactMessage = mongoose.model("ContactMessage", contactMessageSchema);
+
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
@@ -631,33 +686,58 @@ app.post("/api/auth/verify-otp", async (req, res) => {
 
 app.post("/api/auth/login-password", async (req, res) => {
   const { email, password } = req.body;
+
+  // Validate input
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required" });
   }
 
-  const user = await User.findOne({ email });
-  if (!user) {
-    return res.status(400).json({ error: "User not found" });
-  }
-
-  const isMatch = await user.comparePassword(password);
-  if (!isMatch) {
-    return res.status(400).json({ error: "Invalid password" });
-  }
-
-  const token = jwt.sign(
-    { id: user._id, email: user.email },
-    process.env.JWT_SECRET,
-    {
-      expiresIn: "1d",
+  try {
+    // Find user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ error: "User not found" });
     }
-  );
-  res.json({ token });
+
+    // Check if comparePassword method exists
+    if (!user.comparePassword) {
+      console.error("comparePassword method not found on user object", {
+        userId: user._id,
+        email: user.email,
+      });
+      return res.status(500).json({ error: "Server configuration error" });
+    }
+
+    // Compare password
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) {
+      return res.status(400).json({ error: "Invalid password" });
+    }
+
+    // Generate JWT
+    const token = jwt.sign(
+      { id: user._id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    );
+
+    res.json({ token });
+  } catch (err) {
+    console.error("Login error:", {
+      message: err.message,
+      stack: err.stack,
+      path: "/api/auth/login-password",
+      method: "POST",
+      userId: undefined,
+    });
+    res.status(500).json({ error: "Server error during login" });
+  }
 });
 
 app.post("/api/auth/signup", async (req, res) => {
-  const { name, email, password, mobile, rollNo, branch, isACEMStudent } =
-    req.body;
+  const { name, email, password, isACEMStudent, collegeName } = req.body;
+
+  // Validate required fields
   if (!name || !email || !password || isACEMStudent === undefined) {
     return res.status(400).json({
       error: "Name, email, password, and ACEM student status are required",
@@ -667,6 +747,11 @@ app.post("/api/auth/signup", async (req, res) => {
     return res
       .status(400)
       .json({ error: "Password must be at least 6 characters" });
+  }
+  if (!isACEMStudent && !collegeName) {
+    return res
+      .status(400)
+      .json({ error: "College name is required for non-ACEM students" });
   }
 
   try {
@@ -686,23 +771,19 @@ app.post("/api/auth/signup", async (req, res) => {
     user = new User({
       name,
       email,
-      password,
-      mobile,
-      rollNo,
-      branch,
+      password, // Password will be hashed by pre('save') hook
       isAdmin,
       isHeadCoordinator,
       headCoordinatorClubs,
       isACEMStudent,
+      collegeName: !isACEMStudent ? collegeName : null,
     });
     await user.save();
 
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      {
-        expiresIn: "1d",
-      }
+      { expiresIn: "1d" }
     );
     res.json({ token });
   } catch (err) {
@@ -714,8 +795,7 @@ app.post("/api/auth/signup", async (req, res) => {
     }
     if (err.code === 11000) {
       return res.status(400).json({
-        error:
-          "Duplicate key error: email, mobile, or roll number already exists",
+        error: "Duplicate key error: email already exists",
       });
     }
     res.status(500).json({ error: "Signup failed: Internal server error" });
@@ -961,49 +1041,84 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
 
 // User Details Endpoint (POST)
 app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
-  const {
-    semester,
-    course,
-    specialization,
-    isClubMember,
-    clubName,
-    rollNo,
-    isACEMStudent,
-  } = req.body;
-  if (!semester || !course || !specialization || isACEMStudent === undefined) {
-    return res.status(400).json({
-      error:
-        "Semester, course, specialization, and ACEM student status are required",
-    });
-  }
-  if (isClubMember && (!clubName || clubName.length === 0)) {
-    return res
-      .status(400)
-      .json({ error: "Club names are required if you are a club member" });
-  }
-
   try {
-    const user = await User.findById(req.user.id);
+    const {
+      semester,
+      course,
+      specialization,
+      rollNo,
+      isACEMStudent,
+      collegeName,
+      isClubMember,
+      clubName,
+    } = req.body;
+
+    // Validate required fields
+    if (
+      !semester ||
+      !course ||
+      !specialization ||
+      isACEMStudent === undefined
+    ) {
+      return res.status(400).json({
+        error:
+          "Semester, course, specialization, and ACEM student status are required",
+      });
+    }
+    if (isACEMStudent && !rollNo) {
+      return res.status(400).json({
+        error: "Roll number is required for ACEM students",
+      });
+    }
+    if (!isACEMStudent && !collegeName) {
+      return res.status(400).json({
+        error: "College name is required for non-ACEM students",
+      });
+    }
+
+    const userId = req.user.id;
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // Update user fields
     user.semester = semester;
     user.course = course;
     user.specialization = specialization;
-    user.rollNo = rollNo || user.rollNo;
-    user.isClubMember = isClubMember;
-    user.clubName = isClubMember ? clubName : [];
+    user.rollNo = isACEMStudent ? rollNo : null;
     user.isACEMStudent = isACEMStudent;
+    user.collegeName = !isACEMStudent ? collegeName : null;
+    user.isClubMember = isClubMember || false;
+    user.clubName = clubName || [];
+
+    // Update clubs if clubName is provided
+    if (clubName && clubName.length > 0) {
+      const clubs = await Club.find({ name: { $in: clubName } });
+      user.clubs = clubs.map((club) => club._id);
+    } else {
+      user.clubs = [];
+    }
+
     await user.save();
 
-    res.status(200).json({ message: "User details saved successfully" });
+    res.json({ message: "User details updated successfully" });
   } catch (err) {
-    console.error("User details error:", {
+    console.error("Error updating user details:", {
       message: err.message,
       stack: err.stack,
     });
-    res.status(500).json({ error: "Server error in user details update" });
+    if (err.name === "ValidationError") {
+      return res
+        .status(400)
+        .json({ error: `Validation error: ${err.message}` });
+    }
+    if (err.code === 11000) {
+      return res
+        .status(400)
+        .json({ error: "Duplicate key error: roll number already exists" });
+    }
+    res.status(500).json({ error: "Server error in updating user details" });
   }
 });
 
@@ -1065,12 +1180,55 @@ app.patch("/api/auth/user-details", authenticateToken, async (req, res) => {
   }
 });
 
+app.delete("/api/auth/delete-account", authenticateToken, async (req, res) => {
+  try {
+    console.log("Delete account request received for user ID:", req.user.id);
+
+    // Verify user exists
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      console.error("User not found for ID:", req.user.id);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    console.log("User found:", { id: user._id, email: user.email });
+
+    // Optional: Clean up related data
+    await Event.deleteMany({ createdBy: user._id });
+    await Activity.deleteMany({ createdBy: user._id });
+    await Attendance.deleteMany({ createdBy: user._id });
+    await PracticeAttendance.deleteMany({ createdBy: user._id });
+    await Notification.deleteMany({ userId: user._id });
+    await MembershipRequest.deleteMany({ userId: user._id });
+    await Club.updateMany(
+      { members: user._id },
+      { $pull: { members: user._id }, $inc: { memberCount: -1 } }
+    );
+
+    // Delete the user
+    await User.findByIdAndDelete(user._id);
+    console.log("User deleted successfully:", user._id);
+
+    res.status(200).json({ message: "Account deleted successfully" });
+  } catch (err) {
+    console.error("Delete account error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+    });
+    if (err.name === "JsonWebTokenError") {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    res.status(500).json({ error: "Failed to delete account" });
+  }
+});
+
 // Get User Data
 app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
       .select(
-        "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo branch isACEMStudent clubs"
+        "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo isACEMStudent collegeName"
       )
       .populate("clubs", "name");
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -2231,10 +2389,15 @@ app.delete(
 app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   try {
     const { name, email, rollNo, isACEMStudent } = req.body;
-    if (!name || !email || !rollNo || isACEMStudent === undefined) {
+    if (!name || !email || isACEMStudent === undefined) {
       return res
         .status(400)
-        .json({ error: "All registration details are required" });
+        .json({ error: "Name, email, and ACEM student status are required" });
+    }
+    if (isACEMStudent && !rollNo) {
+      return res
+        .status(400)
+        .json({ error: "Roll number is required for ACEM students" });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: "Invalid email address" });
@@ -2250,13 +2413,27 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
     }
 
     const userId = req.user.id;
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
     if (event.registeredUsers.some((reg) => reg.userId.toString() === userId)) {
       return res
         .status(400)
         .json({ error: "User already registered for this event" });
     }
 
-    event.registeredUsers.push({ userId, name, email, rollNo, isACEMStudent });
+    // Use rollNo from user profile if not provided for ACEM students
+    const effectiveRollNo = isACEMStudent ? rollNo || user.rollNo : null;
+
+    event.registeredUsers.push({
+      userId,
+      name,
+      email,
+      rollNo: effectiveRollNo,
+      isACEMStudent,
+    });
     await event.save();
 
     const club = await Club.findById(event.club);
@@ -3103,6 +3280,11 @@ app.post(
         .status(400)
         .json({ error: "Email, name, and ACEM student status are required" });
     }
+    if (isACEMStudent && !rollNo) {
+      return res
+        .status(400)
+        .json({ error: "Roll number is required for ACEM students" });
+    }
 
     try {
       if (!mongoose.isValidObjectId(id)) {
@@ -3116,10 +3298,8 @@ app.post(
         return res.status(404).json({ error: "Club not found" });
       }
 
-      // Check if creator is valid
       if (!club.creator || !mongoose.isValidObjectId(club.creator)) {
-        // Set a fallback creator (e.g., the current user or a super admin)
-        club.creator = req.user.id; // Use the current authenticated user
+        club.creator = req.user.id;
         console.warn(
           `Club ${club._id} had missing/invalid creator; set to ${req.user.id}`
         );
@@ -3137,8 +3317,9 @@ app.post(
           name,
           email,
           password: await bcrypt.hash("defaultPassword123", 10),
-          rollNo,
+          rollNo: isACEMStudent ? rollNo : null,
           isACEMStudent,
+          collegeName: !isACEMStudent ? user?.collegeName : null, // Use existing collegeName
           isClubMember: true,
           clubName: [club.name],
           clubs: [club._id],
@@ -3191,6 +3372,7 @@ app.post(
           email: user.email,
           rollNo: user.rollNo,
           isACEMStudent: user.isACEMStudent,
+          collegeName: user.collegeName,
         },
       });
     } catch (err) {
