@@ -647,34 +647,41 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
-      console.error(
-        "isHeadCoordinatorOrAdmin: User not found for ID:",
-        req.user.id
-      );
+      console.error("isHeadCoordinatorOrAdmin: User not found for ID:", req.user.id);
       return res.status(404).json({ error: "User not found" });
     }
+
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
 
-    if (superAdminEmails.includes(user.email)) {
-      console.log(
-        "isHeadCoordinatorOrAdmin: User is global super admin:",
-        user.email
-      );
+    if (superAdminEmails.includes(user.email) || user.isAdmin) {
+      console.log("isHeadCoordinatorOrAdmin: Authorized as super admin or global admin:", {
+        userId: user._id,
+        email: user.email,
+      });
       return next();
     }
 
-    const clubId =
-      req.params.id ||
-      req.body.club ||
-      req.body.event?.club ||
-      req.params.clubId;
-    if (!clubId) {
-      console.error(
-        "isHeadCoordinatorOrAdmin: Club ID not provided in request"
-      );
-      return res.status(400).json({ error: "Club ID is required" });
+    let clubId;
+    // For PATCH /api/membership-requests/:id, get clubId from MembershipRequest
+    if (req.params.id && req.path.includes("/membership-requests")) {
+      const request = await MembershipRequest.findById(req.params.id).populate("clubId");
+      if (!request || !request.clubId) {
+        console.error("isHeadCoordinatorOrAdmin: Membership request or club not found:", {
+          requestId: req.params.id,
+        });
+        return res.status(404).json({ error: "Membership request or club not found" });
+      }
+      clubId = request.clubId._id;
+    } else {
+      // For other endpoints (e.g., POST /api/clubs/:id/join)
+      clubId = req.params.id || req.body.club || req.body.event?.club || req.params.clubId;
+    }
+
+    if (!clubId || !mongoose.isValidObjectId(clubId)) {
+      console.error("isHeadCoordinatorOrAdmin: Invalid or missing club ID:", clubId);
+      return res.status(400).json({ error: "Valid club ID is required" });
     }
 
     const club = await Club.findById(clubId);
@@ -684,31 +691,27 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
     }
 
     if (user.headCoordinatorClubs.includes(club.name)) {
-      console.log(
-        "isHeadCoordinatorOrAdmin: User authorized for club:",
-        club.name,
-        "as HeadCoordinator"
-      );
+      console.log("isHeadCoordinatorOrAdmin: Authorized as head coordinator for club:", {
+        userId: user._id,
+        clubName: club.name,
+      });
       return next();
     }
 
-    console.error(
-      "isHeadCoordinatorOrAdmin: User not authorized for club:",
-      club.name,
-      "User ID:",
-      user._id,
-      "HeadCoordinatorClubs:",
-      user.headCoordinatorClubs
-    );
-    res.status(403).json({ error: "Head coordinator access required" });
+    console.error("isHeadCoordinatorOrAdmin: User not authorized for club:", {
+      userId: user._id,
+      clubName: club.name,
+      headCoordinatorClubs: user.headCoordinatorClubs,
+    });
+    return res.status(403).json({ error: "Head coordinator or admin access required" });
   } catch (err) {
-    console.error("Head coordinator check error:", {
+    console.error("isHeadCoordinatorOrAdmin: Error in authorization check:", {
       message: err.message,
       stack: err.stack,
       userId: req.user?.id,
-      clubId: req.params.id || req.body.club,
+      clubId: req.params.id || req.body.club || req.body.event?.club || req.params.clubId,
     });
-    res.status(500).json({ error: "Server error in authorization check" });
+    return res.status(500).json({ error: "Server error in authorization check" });
   }
 };
 
@@ -1806,51 +1809,69 @@ app.delete(
   }
 );
 
-// Join Club
+// POST /api/clubs/:id/join
 app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
     if (!mongoose.isValidObjectId(id)) {
+      console.error("POST /api/clubs/:id/join: Invalid club ID:", id);
       return res.status(400).json({ error: "Invalid club ID" });
     }
+
     const club = await Club.findById(id);
     if (!club) {
+      console.error("POST /api/clubs/:id/join: Club not found for ID:", id);
       return res.status(404).json({ error: "Club not found" });
     }
+
     const user = await User.findById(req.user.id);
     if (!user) {
+      console.error("POST /api/clubs/:id/join: User not found for ID:", req.user.id);
       return res.status(404).json({ error: "User not found" });
     }
+
     // Initialize pendingClubs if undefined
     if (!user.pendingClubs) {
       user.pendingClubs = [];
     }
+
     if (user.clubs.some((clubId) => clubId.equals(club._id))) {
-      return res
-        .status(400)
-        .json({ error: "You are already a member of this club" });
+      console.error("POST /api/clubs/:id/join: User already a member of club:", {
+        userId: user._id,
+        clubId: club._id,
+      });
+      return res.status(400).json({ error: "You are already a member of this club" });
     }
+
     const existingRequest = await MembershipRequest.findOne({
       userId: user._id,
       clubId: club._id,
       status: "pending",
     });
     if (existingRequest) {
-      return res
-        .status(400)
-        .json({ error: "You already have a pending request for this club" });
+      console.error("POST /api/clubs/:id/join: Existing pending request found:", {
+        userId: user._id,
+        clubId: club._id,
+      });
+      return res.status(400).json({ error: "You already have a pending request for this club" });
     }
+
     const membershipRequest = new MembershipRequest({
       userId: user._id,
       clubId: club._id,
+      status: "pending",
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
     await membershipRequest.save();
+
     user.pendingClubs.push(club._id);
     await user.save();
+
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
-    const recipients = [...club.headCoordinators, ...superAdminEmails];
+    const recipients = [...(club.headCoordinators || []), ...superAdminEmails];
     if (recipients.length > 0) {
       try {
         await transporter.sendMail({
@@ -1859,23 +1880,31 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
           subject: `New Membership Request for ${club.name}`,
           text: `User ${user.name} (${user.email}) has requested to join ${club.name}.`,
         });
+        console.log("POST /api/clubs/:id/join: Notification email sent to:", recipients);
       } catch (err) {
-        console.error("Error sending membership request email:", {
+        console.error("POST /api/clubs/:id/join: Error sending membership request email:", {
           message: err.message,
           stack: err.stack,
-          userId: req.user.id,
+          userId: user._id,
           clubId: id,
         });
       }
     }
+
     await Notification.create({
       userId: user._id,
       message: `Your request to join ${club.name} has been submitted.`,
       type: "membership",
     });
+
+    console.log("POST /api/clubs/:id/join: Membership request created:", {
+      requestId: membershipRequest._id,
+      userId: user._id,
+      clubId: club._id,
+    });
     res.json({ message: "Membership request submitted successfully" });
   } catch (err) {
-    console.error("Error submitting membership request:", {
+    console.error("POST /api/clubs/:id/join: Error submitting membership request:", {
       message: err.message,
       stack: err.stack,
       userId: req.user?.id,
@@ -1885,82 +1914,130 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
   }
 });
 
-// Get Membership Requests
+// GET /api/membership-requests
 app.get("/api/membership-requests", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
+      console.error("GET /api/membership-requests: User not found for ID:", req.user.id);
       return res.status(404).json({ error: "User not found" });
     }
+
+    const { all } = req.query;
+    const query = all ? {} : { status: "pending" };
+
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
-    let query = {};
-    if (!superAdminEmails.includes(user.email)) {
-      const clubs = await Club.find({
+    if (!superAdminEmails.includes(user.email) && !user.isAdmin) {
+      const managedClubs = await Club.find({
         $or: [
           { creator: user._id },
           { superAdmins: user._id },
-          { name: { $in: user.headCoordinatorClubs } },
+          { name: { $in: user.headCoordinatorClubs || [] } },
         ],
       }).distinct("_id");
-      query.clubId = { $in: clubs };
+      if (managedClubs.length === 0) {
+        console.log("GET /api/membership-requests: No managed clubs for user:", {
+          userId: user._id,
+          email: user.email,
+        });
+        return res.json([]);
+      }
+      query.clubId = { $in: managedClubs };
     }
+
     const requests = await MembershipRequest.find(query)
-      .populate("userId", "name email mobile rollNo isACEMStudent")
-      .populate("clubId", "name");
+      .populate("userId", "name email")
+      .populate("clubId", "name")
+      .lean();
+
+    console.log("GET /api/membership-requests: Fetched requests:", {
+      count: requests.length,
+      userId: user._id,
+      isAdmin: user.isAdmin,
+      headCoordinatorClubs: user.headCoordinatorClubs,
+      query,
+    });
+
     res.json(requests);
   } catch (err) {
-    console.error("Error fetching membership requests:", {
+    console.error("GET /api/membership-requests: Error fetching membership requests:", {
       message: err.message,
       stack: err.stack,
+      userId: req.user?.id,
     });
-    res
-      .status(500)
-      .json({ error: "Server error in fetching membership requests" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// Approve/Reject Membership Request
+// PATCH /api/membership-requests/:id
 app.patch(
   "/api/membership-requests/:id",
   authenticateToken,
-  isSuperAdmin,
+  isHeadCoordinatorOrAdmin,
   async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
-    console.log(`PATCH /api/membership-requests/${id}`);
+
+    console.log("PATCH /api/membership-requests/:id: Processing request:", {
+      requestId: id,
+      status,
+      userId: req.user.id,
+    });
+
+    if (!mongoose.isValidObjectId(id)) {
+      console.error("PATCH /api/membership-requests/:id: Invalid request ID:", id);
+      return res.status(400).json({ error: "Invalid request ID" });
+    }
+
     if (!["approved", "rejected"].includes(status)) {
+      console.error("PATCH /api/membership-requests/:id: Invalid status:", status);
       return res.status(400).json({ error: "Invalid status" });
     }
+
     try {
-      const request = await MembershipRequest.findById(id).populate("clubId");
+      const request = await MembershipRequest.findById(id).populate("clubId userId");
       if (!request) {
+        console.error("PATCH /api/membership-requests/:id: Membership request not found:", id);
         return res.status(404).json({ error: "Membership request not found" });
       }
-      const club = await Club.findById(request.clubId);
+
+      const club = await Club.findById(request.clubId._id);
       if (!club) {
+        console.error("PATCH /api/membership-requests/:id: Club not found:", request.clubId._id);
         await MembershipRequest.deleteOne({ _id: id });
         return res.status(404).json({
-          error: `Club not found. The membership request has been removed.`,
+          error: "Club not found. The membership request has been removed.",
         });
       }
-      request.status = status;
-      await request.save();
-      const targetUser = await User.findById(request.userId);
+
+      const targetUser = await User.findById(request.userId._id);
       if (!targetUser) {
+        console.error("PATCH /api/membership-requests/:id: Target user not found:", request.userId._id);
+        await MembershipRequest.deleteOne({ _id: id });
         return res.status(404).json({ error: "Target user not found" });
       }
+
+      request.status = status;
+      await request.save();
+
       if (status === "approved") {
-        targetUser.clubs.push(club._id);
-        targetUser.isClubMember = true;
+        if (!targetUser.clubs.some((clubId) => clubId.equals(club._id))) {
+          targetUser.clubs.push(club._id);
+          targetUser.clubName.push(club.name);
+          targetUser.isClubMember = true;
+        }
         targetUser.pendingClubs = targetUser.pendingClubs.filter(
           (clubId) => !clubId.equals(club._id)
         );
-        club.members.push(targetUser._id);
-        club.memberCount = club.members.length;
+        if (!club.members.some((memberId) => memberId.equals(targetUser._id))) {
+          club.members.push(targetUser._id);
+          club.memberCount = club.members.length;
+        }
         await targetUser.save();
         await club.save();
+
         try {
           await transporter.sendMail({
             from: `"ACEM" <${process.env.EMAIL_USER}>`,
@@ -1968,25 +2045,27 @@ app.patch(
             subject: `Membership Request Approved for ${club.name}`,
             text: `Congratulations! Your request to join ${club.name} has been approved.`,
           });
+          console.log("PATCH /api/membership-requests/:id: Approval email sent to:", targetUser.email);
         } catch (err) {
-          console.error("Error sending approval email:", {
+          console.error("PATCH /api/membership-requests/:id: Error sending approval email:", {
             message: err.message,
             stack: err.stack,
             userId: targetUser._id,
             clubId: club._id,
           });
         }
+
         await Notification.create({
           userId: targetUser._id,
           message: `Your request to join ${club.name} has been approved.`,
           type: "membership",
         });
-        await MembershipRequest.deleteOne({ _id: id });
       } else {
         targetUser.pendingClubs = targetUser.pendingClubs.filter(
           (clubId) => !clubId.equals(club._id)
         );
         await targetUser.save();
+
         try {
           await transporter.sendMail({
             from: `"ACEM" <${process.env.EMAIL_USER}>`,
@@ -1994,32 +2073,43 @@ app.patch(
             subject: `Membership Request Rejected for ${club.name}`,
             text: `We regret to inform you that your request to join ${club.name} has been rejected.`,
           });
+          console.log("PATCH /api/membership-requests/:id: Rejection email sent to:", targetUser.email);
         } catch (err) {
-          console.error("Error sending rejection email:", {
+          console.error("PATCH /api/membership-requests/:id: Error sending rejection email:", {
             message: err.message,
             stack: err.stack,
             userId: targetUser._id,
             clubId: club._id,
           });
         }
+
         await Notification.create({
           userId: targetUser._id,
           message: `Your request to join ${club.name} has been rejected.`,
           type: "membership",
         });
-        await MembershipRequest.deleteOne({ _id: id });
       }
+
+      // Delete the request after approval/rejection
+      await MembershipRequest.deleteOne({ _id: id });
+
+      console.log("PATCH /api/membership-requests/:id: Membership request updated:", {
+        requestId: id,
+        status,
+        userId: req.user.id,
+        targetUserId: targetUser._id,
+        clubId: club._id,
+      });
+
       res.json({ message: `Membership request ${status} successfully` });
     } catch (err) {
-      console.error("Error updating membership request:", {
+      console.error("PATCH /api/membership-requests/:id: Error updating membership request:", {
         message: err.message,
         stack: err.stack,
-        userId: req.user?.id,
         requestId: id,
+        userId: req.user?.id,
       });
-      res
-        .status(500)
-        .json({ error: "Server error in updating membership request" });
+      res.status(500).json({ error: "Server error in updating membership request" });
     }
   }
 );
