@@ -2511,6 +2511,52 @@ app.get("/api/events/:id", authenticateToken, async (req, res) => {
   }
 });
 
+//delete event :
+app.delete("/api/events/:id", authenticateToken, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: "Invalid event ID" });
+    }
+    if (!req.user || !req.user.id) { // Use 'id' instead of '_id' if needed
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+    const event = await Event.findById(req.params.id).populate("club");
+    if (!event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+    console.log("Event:", {
+      _id: event._id,
+      club: event.club ? { _id: event.club._id, name: event.club.name, superAdmins: event.club.superAdmins } : null,
+    });
+    console.log("User:", {
+      _id: req.user.id, // Use 'id' instead of '_id'
+      isAdmin: req.user.isAdmin,
+      headCoordinatorClubs: req.user.headCoordinatorClubs,
+    });
+    const isAdmin = req.user.isAdmin || false;
+    const isHeadCoordinator = Array.isArray(req.user.headCoordinatorClubs) && 
+      event.club?.name && 
+      req.user.headCoordinatorClubs.includes(event.club.name);
+    const isSuperAdmin = Array.isArray(event.club?.superAdmins) && 
+      event.club.superAdmins.some(
+        (admin) => admin && admin._id && admin._id.toString() === req.user.id.toString() // Use 'id'
+      );
+    if (!isAdmin && !isHeadCoordinator && !isSuperAdmin) {
+      return res.status(403).json({ error: "Unauthorized to delete this event" });
+    }
+    await Event.findByIdAndDelete(req.params.id);
+    res.json({ message: "Event deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting event:", {
+      message: err.message,
+      stack: err.stack,
+      eventId: req.params.id,
+      user: req.user,
+    });
+    res.status(500).json({ error: `Server error while deleting event: ${err.message}` });
+  }
+});
+
 // Update Event (Creator, Super Admin, or Head Coordinator only)
 app.put(
   "/api/events/:id",
