@@ -7,6 +7,9 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const path = require("path");
+const validator = require("validator");
+const { v4: uuidv4 } = require("uuid");
+const QRCode = require("qrcode");
 const fs = require("fs").promises;
 const { v2: cloudinary } = require("cloudinary");
 const streamifier = require("streamifier");
@@ -216,16 +219,12 @@ const Club = mongoose.model("Club", clubSchema);
 const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
-  date: { type: String, required: true },
+  date: { type: Date, required: true }, // Changed to Date type for consistency
   time: { type: String, required: true },
   location: { type: String, required: true },
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
   banner: { type: String },
-  createdBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
-    required: true,
-  },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   registeredUsers: [
     {
       userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
@@ -240,8 +239,17 @@ const eventSchema = new mongoose.Schema({
     enum: ["Seminar", "Competition"],
     required: true,
   },
+  eventType: {
+    type: String,
+    enum: ["Intra-College", "Inter-College"],
+    required: true,
+  },
+  hasRegistrationFee: { type: Boolean, default: false },
+  acemFee: { type: Number, default: 0 },
+  nonAcemFee: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
 });
+eventSchema.index({ club: 1, date: 1 });
 
 const Event = mongoose.model("Event", eventSchema);
 
@@ -959,8 +967,7 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
     }
 
     console.log(
-      `Verifying OTP for ${email}: provided=${otp}, stored=${
-        user.resetPasswordOtp
+      `Verifying OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp
       }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
     if (
@@ -968,8 +975,7 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
       user.resetPasswordExpires < Date.now()
     ) {
       console.log(
-        `OTP verification failed: provided=${otp}, stored=${
-          user.resetPasswordOtp
+        `OTP verification failed: provided=${otp}, stored=${user.resetPasswordOtp
         }, expired=${user.resetPasswordExpires < Date.now()}`
       );
       return res.status(400).json({ error: "Invalid or expired OTP" });
@@ -992,8 +998,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   const { email, otp, newPassword } = req.body;
   if (!email || !otp || !newPassword) {
     console.log(
-      `Missing fields: email=${email}, otp=${otp}, newPassword=${
-        newPassword ? "[provided]" : "missing"
+      `Missing fields: email=${email}, otp=${otp}, newPassword=${newPassword ? "[provided]" : "missing"
       }`
     );
     return res
@@ -1014,8 +1019,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
     }
 
     console.log(
-      `Resetting password for ${email}: provided OTP=${otp}, stored OTP=${
-        user.resetPasswordOtp
+      `Resetting password for ${email}: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp
       }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
     if (
@@ -1023,8 +1027,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
       user.resetPasswordExpires < Date.now()
     ) {
       console.log(
-        `Password reset failed: provided OTP=${otp}, stored OTP=${
-          user.resetPasswordOtp
+        `Password reset failed: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp
         }, expired=${user.resetPasswordExpires < Date.now()}`
       );
       return res.status(400).json({ error: "Invalid or expired OTP" });
@@ -1368,97 +1371,105 @@ app.get("/api/clubs", authenticateToken, async (req, res) => {
 
 // Create Club (Admin only)
 app.post(
-  "/api/clubs",
+  '/api/clubs',
   authenticateToken,
   isAdmin,
   upload.fields([
-    { name: "icon", maxCount: 1 },
-    { name: "banner", maxCount: 1 },
+    { name: 'icon', maxCount: 1 },
+    { name: 'banner', maxCount: 1 },
   ]),
   async (req, res) => {
-    const {
-      name,
-      description,
-      category,
-      contactEmail,
-      headCoordinators,
-      superAdmins,
-    } = req.body;
-    if (!name || !description || !category || !req.files.icon) {
-      return res
-        .status(400)
-        .json({ error: "Name, description, category, and icon are required" });
-    }
-    if (
-      !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-        category
-      )
-    ) {
-      return res.status(400).json({ error: "Invalid category" });
-    }
-    if (description.length > 500) {
-      return res
-        .status(400)
-        .json({ error: "Description must be 500 characters or less" });
-    }
-    if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
-      return res.status(400).json({ error: "Invalid contact email" });
-    }
-
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
-      let iconUrl, bannerUrl;
-      if (req.files.icon) {
+      const {
+        name,
+        description,
+        category,
+        contactEmail,
+        headCoordinators,
+        superAdmins,
+      } = req.body;
+
+      if (!name || !description || !category || !req.files?.icon) {
+        return res
+          .status(400)
+          .json({ error: 'Name, description, category, and icon are required' });
+      }
+
+      if (!['Technical', 'Cultural', 'Literary', 'Entrepreneurial'].includes(category)) {
+        return res.status(400).json({ error: 'Invalid category' });
+      }
+
+      if (description.length > 500) {
+        return res
+          .status(400)
+          .json({ error: 'Description must be 500 characters or less' });
+      }
+
+      if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
+        return res.status(400).json({ error: 'Invalid contact email' });
+      }
+
+      let iconUrl = null;
+      let bannerUrl = null;
+      if (req.files?.icon) {
         iconUrl = await uploadToCloudinary(req.files.icon[0].buffer);
       }
-      if (req.files.banner) {
+      if (req.files?.banner) {
         bannerUrl = await uploadToCloudinary(req.files.banner[0].buffer);
       }
 
       let validHeadCoordinators = [];
       if (headCoordinators) {
-        const emails = headCoordinators
-          .split(",")
-          .map((email) => email.trim())
-          .filter((email) => email);
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        validHeadCoordinators = emails.filter((email) =>
-          emailRegex.test(email)
-        );
-        await User.updateMany(
-          { email: { $in: validHeadCoordinators } },
-          {
-            $set: { isHeadCoordinator: true },
-            $addToSet: { headCoordinatorClubs: name },
+        let emails;
+        try {
+          emails = typeof headCoordinators === 'string' ? JSON.parse(headCoordinators) : headCoordinators;
+          if (!Array.isArray(emails)) {
+            return res.status(400).json({ error: 'headCoordinators must be an array' });
           }
-        );
+        } catch (e) {
+          return res.status(400).json({ error: 'Invalid headCoordinators format' });
+        }
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        validHeadCoordinators = emails.filter((email) => emailRegex.test(email));
+        if (validHeadCoordinators.length > 0) {
+          await User.updateMany(
+            { email: { $in: validHeadCoordinators } },
+            {
+              $set: { isHeadCoordinator: true },
+              $addToSet: { headCoordinatorClubs: name },
+            },
+            { session }
+          );
+        }
       }
 
       let validSuperAdmins = [req.user.id];
       if (superAdmins) {
-        const adminIds = superAdmins
-          .split(",")
-          .map((id) => id.trim())
-          .filter((id) => id && id !== req.user.id);
-        if (adminIds.length + 1 > 2) {
-          return res
-            .status(400)
-            .json({ error: "A club can have at most 2 super admins" });
+        let adminIds;
+        try {
+          adminIds = typeof superAdmins === 'string' ? JSON.parse(superAdmins) : superAdmins;
+          if (!Array.isArray(adminIds)) {
+            return res.status(400).json({ error: 'superAdmins must be an array' });
+          }
+        } catch (e) {
+          return res.status(400).json({ error: 'Invalid superAdmins format' });
         }
-        const users = await User.find({ _id: { $in: adminIds } });
-        validSuperAdmins = [
-          ...validSuperAdmins,
-          ...users.map((user) => user._id),
-        ];
+        adminIds = adminIds.filter((id) => id && id !== req.user.id && mongoose.isValidObjectId(id));
+        if (adminIds.length + 1 > 2) {
+          return res.status(400).json({ error: 'A club can have at most 2 super admins' });
+        }
+        const users = await User.find({ _id: { $in: adminIds } }).session(session);
+        validSuperAdmins = [...validSuperAdmins, ...users.map((user) => user._id)];
         if (validSuperAdmins.length !== adminIds.length + 1) {
-          return res
-            .status(400)
-            .json({ error: "One or more super admin IDs are invalid" });
+          return res.status(400).json({ error: 'One or more super admin IDs are invalid' });
         }
       }
 
-      const creator = await User.findById(req.user.id);
+      const creator = await User.findById(req.user.id).session(session);
       if (!creator) {
-        return res.status(404).json({ error: "Creator not found" });
+        return res.status(404).json({ error: 'Creator not found' });
       }
 
       const club = new Club({
@@ -1471,48 +1482,52 @@ app.post(
         headCoordinators: validHeadCoordinators,
         superAdmins: validSuperAdmins,
         creator: req.user.id,
-        memberCount: 1, // Initialize with 1 to account for the creator
+        memberCount: 1,
         eventsCount: 0,
-        members: [req.user.id], // Add creator to members array
+        members: [req.user.id],
       });
-      await club.save();
+      await club.save({ session });
 
-      // Update creator's User document
-      creator.clubName = [...new Set([...creator.clubName, name])];
-      creator.clubs = [...new Set([...creator.clubs, club._id])];
+      creator.clubName = [...new Set([...(creator.clubName || []), name])];
+      creator.clubs = [...new Set([...(creator.clubs || []), club._id])];
       creator.isClubMember = true;
-      await creator.save();
+      await creator.save({ session });
 
-      // Send notification to creator
-      await Notification.create({
-        userId: creator._id,
-        message: `You have successfully created and joined ${name} as a member.`,
-        type: "membership",
-      });
+      await Notification.create(
+        [{
+          userId: creator._id,
+          message: `You have successfully created and joined ${name} as a member.`,
+          type: 'membership',
+        }],
+        { session }
+      );
 
+      await session.commitTransaction();
       const populatedClub = await Club.findById(club._id)
-        .populate("superAdmins", "name email")
-        .populate("members", "name email")
-        .populate("creator", "name email");
-      const transformedClub = {
-        ...populatedClub._doc,
-        icon: populatedClub.icon || null,
-        banner: populatedClub.banner || null,
-      };
-      res
-        .status(201)
-        .json({ message: "Club created successfully", club: transformedClub });
+        .populate('superAdmins', 'name email')
+        .populate('members', 'name email')
+        .populate('creator', 'name email')
+        .session(session);
+      res.status(201).json({
+        message: 'Club created successfully',
+        club: {
+          ...populatedClub._doc,
+          icon: populatedClub.icon || null,
+          banner: populatedClub.banner || null,
+        },
+      });
     } catch (err) {
-      console.error("Club creation error:", err);
+      await session.abortTransaction();
+      console.error('Club creation error:', { message: err.message, stack: err.stack });
       if (err.code === 11000) {
-        return res.status(400).json({ error: "Club name already exists" });
+        return res.status(400).json({ error: 'Club name already exists' });
       }
-      if (err.name === "ValidationError") {
-        return res
-          .status(400)
-          .json({ error: `Validation error: ${err.message}` });
+      if (err.name === 'ValidationError') {
+        return res.status(400).json({ error: `Validation error: ${err.message}` });
       }
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: err.message || 'Server error' });
+    } finally {
+      session.endSession();
     }
   }
 );
@@ -1577,9 +1592,9 @@ app.patch(
       if (headCoordinators !== undefined) {
         const emails = headCoordinators
           ? headCoordinators
-              .split(",")
-              .map((email) => email.trim())
-              .filter((email) => email)
+            .split(",")
+            .map((email) => email.trim())
+            .filter((email) => email)
           : [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         validHeadCoordinators = emails.filter((email) =>
@@ -1625,9 +1640,9 @@ app.patch(
       if (superAdmins !== undefined) {
         const adminIds = superAdmins
           ? superAdmins
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id)
+            .split(",")
+            .map((id) => id.trim())
+            .filter((id) => id)
           : [];
         if (adminIds.length > 2) {
           return res
@@ -2210,65 +2225,147 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
 
 // Create Event (Creator, Super Admin, or Head Coordinator only)
 app.post(
-  "/api/events",
+  '/api/events',
   authenticateToken,
-  isSuperAdmin,
-  upload.single("banner"),
+  isHeadCoordinatorOrAdmin,
+  upload.single('banner'),
   async (req, res) => {
-    const { title, description, date, time, location, club, category } =
-      req.body;
-    if (
-      !title ||
-      !description ||
-      !date ||
-      !time ||
-      !location ||
-      !club ||
-      !category
-    ) {
-      return res
-        .status(400)
-        .json({ error: "All fields including category are required" });
-    }
-    if (!["Seminar", "Competition"].includes(category)) {
-      return res.status(400).json({ error: "Invalid event category" });
-    }
-
     try {
-      const clubDoc = await Club.findById(club);
-      if (!clubDoc) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-
-      let bannerUrl = null;
-      if (req.file) {
-        bannerUrl = await uploadToCloudinary(req.file.buffer);
-      }
-
-      const event = new Event({
+      const {
         title,
         description,
         date,
         time,
         location,
         club,
+        category,
+        eventType,
+        hasRegistrationFee,
+        acemFee,
+        nonAcemFee,
+      } = req.body;
+
+      if (
+        !title ||
+        !description ||
+        !date ||
+        !time ||
+        !location ||
+        !club ||
+        !category ||
+        !eventType
+      ) {
+        return res.status(400).json({ error: 'All required fields must be provided' });
+      }
+
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: 'Invalid club ID' });
+      }
+
+      if (!['Seminar', 'Competition'].includes(category)) {
+        return res.status(400).json({ error: 'Invalid event category' });
+      }
+
+      if (!['Intra-College', 'Inter-College'].includes(eventType)) {
+        return res.status(400).json({ error: 'Invalid event type' });
+      }
+
+      const parsedDate = new Date(date);
+      if (isNaN(parsedDate.getTime())) {
+        return res.status(400).json({ error: 'Invalid date format' });
+      }
+
+      const isFeeRequired = eventType === 'Inter-College' && hasRegistrationFee === 'true';
+      if (isFeeRequired) {
+        if (
+          !acemFee ||
+          !nonAcemFee ||
+          isNaN(acemFee) ||
+          isNaN(nonAcemFee) ||
+          parseFloat(acemFee) < 0 ||
+          parseFloat(nonAcemFee) < 0
+        ) {
+          return res.status(400).json({
+            error: 'Valid registration fees are required for Inter-College events',
+          });
+        }
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      const clubDoc = await Club.findById(club);
+      if (!clubDoc) return res.status(404).json({ error: 'Club not found' });
+
+      const isAuthorized =
+        user.isAdmin ||
+        clubDoc.creator.equals(req.user.id) ||
+        clubDoc.superAdmins.some((admin) => admin.equals(req.user.id)) ||
+        user.headCoordinatorClubs.includes(clubDoc.name);
+
+      if (!isAuthorized) {
+        return res.status(403).json({
+          error: 'Not authorized to create events for this club',
+        });
+      }
+
+      let bannerUrl = null;
+      if (req.file) {
+        if (!['image/jpeg', 'image/png'].includes(req.file.mimetype)) {
+          return res.status(400).json({ error: 'Banner must be a JPEG or PNG image' });
+        }
+        if (req.file.size > 5 * 1024 * 1024) {
+          return res.status(400).json({ error: 'Banner size must be less than 5MB' });
+        }
+        bannerUrl = await uploadToCloudinary(req.file.buffer);
+      }
+
+      const event = new Event({
+        title,
+        description,
+        date: parsedDate,
+        time,
+        location,
+        club,
         banner: bannerUrl,
         createdBy: req.user.id,
         category,
+        eventType,
+        hasRegistrationFee: isFeeRequired,
+        acemFee: isFeeRequired ? parseFloat(acemFee) : 0,
+        nonAcemFee: isFeeRequired ? parseFloat(nonAcemFee) : 0,
+        registeredUsers: [],
       });
-      await event.save();
 
+      await event.save();
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
       await clubDoc.save();
 
-      const transformedEvent = {
-        ...event._doc,
-        banner: event.banner || null,
-      };
-      res.status(201).json(transformedEvent);
+      await Notification.create({
+        userId: req.user.id,
+        message: `Event "${title}" created successfully for ${clubDoc.name}.`,
+        type: 'event',
+      });
+
+      res.status(201).json({
+        message: 'Event created successfully',
+        event: {
+          ...event._doc,
+          banner: event.banner || null,
+        },
+      });
     } catch (err) {
-      console.error("Event creation error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error('Event creation error:', { message: err.message, stack: err.stack });
+      if (err.code === 11000) {
+        return res.status(400).json({ error: 'Event with this title already exists for this club' });
+      }
+      if (err.name === 'ValidationError') {
+        return res.status(400).json({ error: `Validation error: ${err.message}` });
+      }
+      if (err.name === 'CastError') {
+        return res.status(400).json({ error: 'Invalid data format' });
+      }
+      res.status(500).json({ error: err.message || 'Failed to create event' });
     }
   }
 );
@@ -2397,105 +2494,281 @@ app.put(
   }
 );
 // Delete Event (Creator, Super Admin, or Head Coordinator only)
-app.delete(
-  "/api/events/:id",
-  authenticateToken,
-  isSuperAdmin,
-  async (req, res) => {
-    try {
-      if (!mongoose.isValidObjectId(req.params.id)) {
-        return res.status(400).json({ error: "Invalid event ID" });
-      }
-
-      const event = await Event.findById(req.params.id);
-      if (!event) {
-        return res.status(404).json({ error: "Event not found" });
-      }
-
-      const club = await Club.findById(event.club);
-      if (!club) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-
-      if (event.banner) {
-        try {
-          await fs.access(event.banner);
-          await fs.unlink(event.banner);
-        } catch (err) {
-          console.warn("Failed to delete event banner:", {
-            message: err.message,
-            path: event.banner,
-          });
-        }
-      }
-
-      await event.deleteOne();
-
-      club.eventsCount = await Event.countDocuments({ club: club._id });
-      await club.save();
-
-      const members = await User.find({ _id: { $in: club.members } });
-      for (const member of members) {
-        await Notification.create({
-          userId: member._id,
-          message: `${event.category} "${event.title}" for ${club.name} has been deleted.`,
-          type: "event",
-        });
-      }
-
-      res.json({ message: "Event deleted successfully" });
-    } catch (err) {
-      console.error("Event deletion error:", {
-        message: err.message,
-        stack: err.stack,
-      });
-      res.status(500).json({ error: "Server error in event deletion" });
-    }
-  }
-);
-
-// Register for Event
-app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
+app.post('/api/events/:id/register', authenticateToken, async (req, res) => {
+  const session = await mongoose.startSession();
+  console.log('Starting registration for event:', req.params.id, 'User:', req.user?.id);
+  session.startTransaction();
   try {
     const { name, email, rollNo, isACEMStudent } = req.body;
+    console.log('Received payload:', { name, email, rollNo, isACEMStudent });
+
+    // Validate input
     if (!name || !email || isACEMStudent === undefined) {
-      return res
-        .status(400)
-        .json({ error: "Name, email, and ACEM student status are required" });
+      console.error('Validation failed: Missing required fields', { name, email, isACEMStudent });
+      return res.status(400).json({ error: 'Name, email, and ACEM student status are required' });
     }
+
     if (isACEMStudent && !rollNo) {
-      return res
-        .status(400)
-        .json({ error: "Roll number is required for ACEM students" });
+      console.error('Validation failed: Roll number required for ACEM students', { rollNo });
+      return res.status(400).json({ error: 'Roll number is required for ACEM students' });
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({ error: "Invalid email address" });
+
+    if (!validator.isEmail(email)) {
+      console.error('Validation failed: Invalid email', { email });
+      return res.status(400).json({ error: 'Invalid email address' });
     }
 
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ error: "Invalid event ID" });
+      console.error('Validation failed: Invalid event ID', { eventId: req.params.id });
+      return res.status(400).json({ error: 'Invalid event ID' });
     }
 
-    const event = await Event.findById(req.params.id);
+    // Fetch event
+    console.log('Fetching event:', req.params.id);
+    const event = await Event.findById(req.params.id).populate('club').session(session);
     if (!event) {
-      return res.status(404).json({ error: "Event not found" });
+      console.error('Event not found:', req.params.id);
+      return res.status(404).json({ error: 'Event not found' });
+    }
+
+    if (!event.club || !mongoose.isValidObjectId(event.club._id)) {
+      console.error('Club not found or invalid for event:', req.params.id, { club: event.club });
+      return res.status(400).json({ error: 'Invalid club reference for this event' });
+    }
+
+    // Fetch user
+    console.log('Fetching user:', req.user.id);
+    const user = await User.findById(req.user.id).session(session);
+    if (!user) {
+      console.error('User not found:', req.user.id);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check for duplicate registration
+    if (!Array.isArray(event.registeredUsers)) {
+      event.registeredUsers = [];
+    }
+    if (event.registeredUsers.some((reg) => reg.userId.toString() === req.user.id)) {
+      console.error('Duplicate registration for user:', req.user.id, 'Event:', req.params.id);
+      return res.status(400).json({ error: 'User already registered for this event' });
+    }
+
+    // Check event type restriction
+    if (event.eventType === 'Intra-College' && !isACEMStudent) {
+      console.error('Intra-College restriction violated for user:', req.user.id);
+      return res.status(403).json({ error: 'Only ACEM students can register for Intra-College events' });
+    }
+
+    // Handle payment (simulated)
+    let paymentStatus = 'not_required';
+    let transactionId = null;
+    if (event.eventType === 'Inter-College' && event.hasRegistrationFee) {
+      const amount = isACEMStudent ? event.acemFee : event.nonAcemFee;
+      transactionId = `TXN_${uuidv4()}`;
+      paymentStatus = 'success'; // Simulate successful payment
+      if (paymentStatus !== 'success') {
+        console.error('Payment failed for event:', event._id);
+        return res.status(400).json({ error: 'Payment failed' });
+      }
+    }
+
+    // Use rollNo from request or user
+    const effectiveRollNo = isACEMStudent ? rollNo || user.rollNo : null;
+
+    // Handle club membership for ACEM students
+    if (isACEMStudent) {
+      console.log('Checking club membership for club:', event.club._id);
+      const club = await Club.findById(event.club._id).session(session);
+      if (!club) {
+        console.error('Club not found:', event.club._id);
+        return res.status(400).json({ error: 'Club not found' });
+      }
+      if (!club.members.includes(req.user.id)) {
+        console.log('Adding user to club:', club._id);
+        club.members = club.members || [];
+        club.members.push(req.user.id);
+        club.memberCount = await User.countDocuments({ clubName: club.name });
+        await club.save({ session });
+        user.clubName = [...new Set([...(user.clubName || []), club.name])];
+        user.clubs = [...new Set([...(user.clubs || []), club._id])];
+        user.isClubMember = true;
+        await user.save({ session });
+      }
+    }
+
+    // Register user
+    console.log('Registering user for event:', event._id);
+    event.registeredUsers.push({
+      userId: req.user.id,
+      name,
+      email,
+      rollNo: effectiveRollNo,
+      isACEMStudent,
+    });
+    await event.save({ session });
+
+    // Generate QR code for non-ACEM Inter-College events
+    let qrCode = null;
+    if (!isACEMStudent && event.eventType === 'Inter-College') {
+      console.log('Generating QR code for user:', req.user.id);
+      const qrData = JSON.stringify({
+        userId: req.user.id,
+        eventId: event._id,
+        transactionId: transactionId || uuidv4(),
+        eventTitle: event.title,
+        userName: name,
+      });
+      try {
+        qrCode = await QRCode.toDataURL(qrData);
+      } catch (qrError) {
+        console.error('QR code generation failed:', {
+          message: qrError.message,
+          stack: qrError.stack,
+        });
+        throw new Error('Failed to generate QR code');
+      }
+    }
+
+    // Create notification
+    console.log('Creating notification for user:', req.user.id);
+    await Notification.create(
+      [{
+        userId: req.user.id,
+        message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title}" in ${event.club.name}.`,
+        type: 'event',
+      }],
+      { session }
+    );
+
+    // Send email with QR code
+    if (qrCode) {
+      console.log('Sending email with QR code to:', email);
+      try {
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: email,
+          subject: `Registration Confirmation for ${event.title}`,
+          html: `
+              <h3>Registration Successful</h3>
+              <p>Thank you for registering for ${event.title}!</p>
+              <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
+              <p>Event Time: ${event.time}</p>
+              <p>Location: ${event.location}</p>
+              ${event.hasRegistrationFee ? `<p>Payment Amount: ${isACEMStudent ? event.acemFee : event.nonAcemFee} INR</p>` : ''}
+              <p>Scan the QR code below to verify your registration:</p>
+              <img src="${qrCode}" alt="Registration QR Code" />
+            `,
+        });
+      } catch (emailError) {
+        console.error('Email sending failed:', {
+          message: emailError.message,
+          stack: emailError.stack,
+        });
+        throw new Error('Failed to send registration email');
+      }
+    }
+
+    await session.commitTransaction();
+    console.log('Registration successful for event:', event._id, 'User:', req.user.id);
+    res.json({
+      message: isACEMStudent
+        ? 'Successfully joined the club and registered for the event'
+        : 'Registration successful',
+      qrCode,
+      paymentStatus,
+      transactionId,
+    });
+  } catch (err) {
+    console.error('Error in registration route:', {
+      message: err.message,
+      stack: err.stack,
+      code: err.code,
+      eventId: req.params.id,
+      userId: req.user?.id,
+    });
+    await session.abortTransaction();
+    res.status(500).json({ error: `Server error: ${err.message}` });
+  } finally {
+    session.endSession();
+  }
+});
+
+// Register for Event
+app.post('/api/events/:id/register', authenticateToken, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const { name, email, rollNo, isACEMStudent } = req.body;
+
+    if (!name || !email || isACEMStudent === undefined) {
+      return res.status(400).json({ error: 'Name, email, and ACEM student status are required' });
+    }
+
+    if (isACEMStudent && !rollNo) {
+      return res.status(400).json({ error: 'Roll number is required for ACEM students' });
+    }
+
+    if (!validator.isEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid event ID' });
+    }
+
+    const event = await Event.findById(req.params.id).populate('club').session(session);
+    if (!event) {
+      return res.status(404).json({ error: 'Event not found' });
     }
 
     const userId = req.user.id;
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).session(session);
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: 'User not found' });
     }
 
-    if (event.registeredUsers.some((reg) => reg.userId.toString() === userId)) {
-      return res
-        .status(400)
-        .json({ error: "User already registered for this event" });
+    if (event.registeredUsers?.some((reg) => reg.userId.toString() === userId)) {
+      return res.status(400).json({ error: 'User already registered for this event' });
     }
 
-    // Use rollNo from user profile if not provided for ACEM students
+    if (event.eventType === 'Intra-College' && !isACEMStudent) {
+      return res.status(403).json({ error: 'Only ACEM students can register for Intra-College events' });
+    }
+
+    let paymentStatus = 'not_required';
+    let transactionId = null;
+    if (event.eventType === 'Inter-College' && event.hasRegistrationFee) {
+      const amount = isACEMStudent ? event.acemFee : event.nonAcemFee;
+      if (!amount || isNaN(amount) || amount < 0) {
+        return res.status(400).json({ error: 'Invalid registration fee amount' });
+      }
+      transactionId = `TXN_${uuidv4()}`;
+      paymentStatus = 'success'; // Replace with real payment gateway integration
+      if (paymentStatus !== 'success') {
+        return res.status(400).json({ error: 'Payment failed' });
+      }
+    }
+
     const effectiveRollNo = isACEMStudent ? rollNo || user.rollNo : null;
 
+    if (isACEMStudent) {
+      const club = await Club.findById(event.club._id).session(session);
+      if (!club) {
+        return res.status(404).json({ error: 'Club not found' });
+      }
+      if (!club.members.includes(userId)) {
+        club.members = club.members || [];
+        club.members.push(userId);
+        club.memberCount = await User.countDocuments({ clubName: club.name });
+        await club.save({ session });
+        user.clubName = [...new Set([...(user.clubName || []), club.name])];
+        user.clubs = [...new Set([...(user.clubs || []), club._id])];
+        user.isClubMember = true;
+        await user.save({ session });
+      }
+    }
+
+    event.registeredUsers = event.registeredUsers || [];
     event.registeredUsers.push({
       userId,
       name,
@@ -2503,27 +2776,62 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
       rollNo: effectiveRollNo,
       isACEMStudent,
     });
-    await event.save();
+    await event.save({ session });
 
-    const club = await Club.findById(event.club);
-    await Notification.create({
-      userId,
-      message: `You have successfully registered for the ${event.category.toLowerCase()} "${
-        event.title
-      }" in ${club.name}.`,
-      type: "event",
-    });
-
-    res.json({ message: "Successfully registered for the event" });
-  } catch (err) {
-    console.error("Error registering for event:", {
-      message: err.message,
-      stack: err.stack,
-    });
-    if (err.code === 11000) {
-      return res.status(400).json({ error: "Duplicate registration details" });
+    let qrCode = null;
+    if (!isACEMStudent && event.eventType === 'Inter-College') {
+      const qrData = JSON.stringify({
+        userId,
+        eventId: event._id,
+        transactionId: transactionId || uuidv4(),
+        eventTitle: event.title,
+        userName: name,
+      });
+      qrCode = await QRCode.toDataURL(qrData);
     }
-    res.status(500).json({ error: "Server error in event registration" });
+
+    await Notification.create(
+      [{
+        userId,
+        message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title}" in ${event.club.name}.`,
+        type: 'event',
+      }],
+      { session }
+    );
+
+    if (qrCode) {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: `Registration Confirmation for ${event.title}`,
+        html: `
+            <h3>Registration Successful</h3>
+            <p>Thank you for registering for ${event.title}!</p>
+            <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
+            <p>Event Time: ${event.time}</p>
+            <p>Location: ${event.location}</p>
+            ${event.hasRegistrationFee ? `<p>Payment Amount: ${isACEMStudent ? event.acemFee : event.nonAcemFee} INR</p>` : ''}
+            <p>Scan the QR code below to verify your registration:</p>
+            <img src="${qrCode}" alt="Registration QR Code" />
+          `,
+      });
+    }
+
+    await session.commitTransaction();
+    res.json({
+      message: isACEMStudent
+        ? 'Successfully joined the club and registered for the event'
+        : 'Registration successful',
+      qrCode,
+      paymentStatus,
+      transactionId,
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error('Error registering for event:', { message: err.message, stack: err.stack });
+    res.status(500).json({ error: err.message || 'Failed to register for event' });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -2818,11 +3126,9 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${
-            eventDoc.title
-          }" on ${date} has been marked as ${entry.status} (${
-            entry.status === "present" ? "5 points" : "0 points"
-          }).`,
+          message: `Your attendance for "${eventDoc.title
+            }" on ${date} has been marked as ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"
+            }).`,
           type: "attendance",
         });
       }
@@ -2974,11 +3280,9 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${event.title}" on ${
-            attendanceRecord.date.toISOString().split("T")[0]
-          } has been updated to ${entry.status} (${
-            entry.status === "present" ? "5 points" : "0 points"
-          }).`,
+          message: `Your attendance for "${event.title}" on ${attendanceRecord.date.toISOString().split("T")[0]
+            } has been updated to ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"
+            }).`,
           type: "attendance",
         });
       }
@@ -3146,13 +3450,11 @@ app.post(
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: user.email,
           subject: `Added to ${club.name}`,
-          text: `You have been added to ${
-            club.name
-          } as a member. Please log in to the ACEM platform to view details${
-            user.password
+          text: `You have been added to ${club.name
+            } as a member. Please log in to the ACEM platform to view details${user.password
               ? ". Your temporary password is 'defaultPassword123'. Please reset it upon login."
               : "."
-          }`,
+            }`,
         });
       } catch (emailErr) {
         console.error("Error sending email to new member:", {
@@ -3311,11 +3613,9 @@ app.get(
                 ],
               }),
               new Paragraph({
-                text: `Stats: Present: ${
-                  attendanceRecord.stats?.presentCount || 0
-                }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${
-                  attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
-                }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
+                text: `Stats: Present: ${attendanceRecord.stats?.presentCount || 0
+                  }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
+                  }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
                 spacing: { after: 200 },
               }),
             ],
@@ -3532,9 +3832,8 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${
-            entry.status
-          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${entry.status
+            } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3846,9 +4145,8 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${
-            entry.status
-          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${entry.status
+            } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -3925,13 +4223,12 @@ app.get(
               }),
               ...(startDate || endDate
                 ? [
-                    new Paragraph({
-                      text: `Date Range: ${startDate || "N/A"} to ${
-                        endDate || "N/A"
+                  new Paragraph({
+                    text: `Date Range: ${startDate || "N/A"} to ${endDate || "N/A"
                       }`,
-                      spacing: { after: 200 },
-                    }),
-                  ]
+                    spacing: { after: 200 },
+                  }),
+                ]
                 : []),
               new Paragraph({
                 text: "Event Attendance",
@@ -3940,9 +4237,8 @@ app.get(
               }),
               ...eventAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Event: ${
-                    record.event.title
-                  } | Date: ${record.date.toLocaleDateString()}`,
+                  text: `Event: ${record.event.title
+                    } | Date: ${record.date.toLocaleDateString()}`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -4007,13 +4303,11 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(
-                    2
-                  )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -4024,11 +4318,9 @@ app.get(
               }),
               ...practiceAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Practice: ${
-                    record.title
-                  } | Date: ${record.date.toLocaleDateString()} | Room: ${
-                    record.roomNo
-                  }`,
+                  text: `Practice: ${record.title
+                    } | Date: ${record.date.toLocaleDateString()} | Room: ${record.roomNo
+                    }`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -4093,13 +4385,11 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(
-                    2
-                  )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -4204,8 +4494,8 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
         const clubNames = Array.isArray(user.clubName)
           ? user.clubName
           : user.clubName
-          ? [user.clubName]
-          : [];
+            ? [user.clubName]
+            : [];
 
         // Construct clubRoles if not provided, defaulting to 'member' for each club
         const clubRoles =
