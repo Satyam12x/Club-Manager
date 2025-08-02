@@ -912,6 +912,7 @@ app.post("/api/auth/verify-otp-login", async (req, res) => {
 app.post("/api/auth/reset-password-otp-request", async (req, res) => {
   const { email } = req.body;
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    console.log(`Invalid email provided: ${email}`);
     return res.status(400).json({ error: "Invalid email address" });
   }
 
@@ -932,17 +933,26 @@ app.post("/api/auth/reset-password-otp-request", async (req, res) => {
       )}`
     );
 
-    await transporter.sendMail({
-      from: `"ACEM" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "ACEM Password Reset OTP",
-      text: `Your OTP for password reset is: ${resetOtp}\nThis OTP is valid for 1 hour.\nIf you did not request this, please ignore this email.`,
-      html: `<p>Your OTP for password reset is: <strong>${resetOtp}</strong></p>
-             <p>This OTP is valid for 1 hour.</p>
-             <p>If you did not request this, please ignore this email.</p>`,
-    });
+    try {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: "ACEM Password Reset OTP",
+        text: `Your OTP for password reset is: ${resetOtp}\nThis OTP is valid for 1 hour.\nIf you did not request this, please ignore this email.`,
+        html: `<p>Your OTP for password reset is: <strong>${resetOtp}</strong></p>
+               <p>This OTP is valid for 1 hour.</p>
+               <p>If you did not request this, please ignore this email.</p>`,
+      });
+      console.log(`Password reset OTP sent to ${email}`);
+    } catch (emailErr) {
+      console.error("Error sending password reset OTP email:", {
+        message: emailErr.message,
+        stack: emailErr.stack,
+        email,
+      });
+      return res.status(500).json({ error: "Failed to send OTP email" });
+    }
 
-    console.log(`Password reset OTP sent to ${email}`);
     res.json({ message: "Password reset OTP sent successfully" });
   } catch (err) {
     console.error("Password reset OTP request error:", {
@@ -957,9 +967,9 @@ app.post("/api/auth/reset-password-otp-request", async (req, res) => {
 // Verify Reset OTP
 app.post("/api/auth/verify-reset-otp", async (req, res) => {
   const { email, otp } = req.body;
-  if (!email || !otp) {
-    console.log(`Missing email or OTP: email=${email}, otp=${otp}`);
-    return res.status(400).json({ error: "Email and OTP are required" });
+  if (!email || !otp || !/^\d{6}$/.test(otp)) {
+    console.log(`Missing or invalid fields: email=${email}, otp=${otp}`);
+    return res.status(400).json({ error: "Email and 6-digit OTP are required" });
   }
 
   try {
@@ -970,18 +980,22 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
     }
 
     console.log(
-      `Verifying OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp
-      }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
+      `Verifying OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp}, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
-    if (
-      user.resetPasswordOtp !== otp ||
-      user.resetPasswordExpires < Date.now()
-    ) {
-      console.log(
-        `OTP verification failed: provided=${otp}, stored=${user.resetPasswordOtp
-        }, expired=${user.resetPasswordExpires < Date.now()}`
-      );
-      return res.status(400).json({ error: "Invalid or expired OTP" });
+
+    if (!user.resetPasswordOtp || !user.resetPasswordExpires) {
+      console.log(`No OTP set for user: ${email}`);
+      return res.status(400).json({ error: "No OTP requested or OTP expired" });
+    }
+
+    if (user.resetPasswordExpires < Date.now()) {
+      console.log(`OTP expired for ${email}: expires=${user.resetPasswordExpires}, now=${Date.now()}`);
+      return res.status(400).json({ error: "Expired OTP" });
+    }
+
+    if (user.resetPasswordOtp !== otp) {
+      console.log(`Invalid OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp}`);
+      return res.status(400).json({ error: "Invalid OTP" });
     }
 
     res.json({ message: "OTP verified successfully", email: user.email });
@@ -999,16 +1013,16 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
 // Reset Password
 app.post("/api/auth/reset-password", async (req, res) => {
   const { email, otp, newPassword } = req.body;
-  if (!email || !otp || !newPassword) {
+  if (!email || !otp || !newPassword || !/^\d{6}$/.test(otp)) {
     console.log(
-      `Missing fields: email=${email}, otp=${otp}, newPassword=${newPassword ? "[provided]" : "missing"
-      }`
+      `Missing or invalid fields: email=${email}, otp=${otp}, newPassword=${newPassword ? "[provided]" : "missing"}`
     );
     return res
       .status(400)
-      .json({ error: "Email, OTP, and new password are required" });
+      .json({ error: "Email, 6-digit OTP, and new password are required" });
   }
   if (newPassword.length < 6) {
+    console.log(`Password too short for ${email}: length=${newPassword.length}`);
     return res
       .status(400)
       .json({ error: "Password must be at least 6 characters" });
@@ -1022,18 +1036,22 @@ app.post("/api/auth/reset-password", async (req, res) => {
     }
 
     console.log(
-      `Resetting password for ${email}: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp
-      }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
+      `Resetting password for ${email}: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp}, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
-    if (
-      user.resetPasswordOtp !== otp ||
-      user.resetPasswordExpires < Date.now()
-    ) {
-      console.log(
-        `Password reset failed: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp
-        }, expired=${user.resetPasswordExpires < Date.now()}`
-      );
-      return res.status(400).json({ error: "Invalid or expired OTP" });
+
+    if (!user.resetPasswordOtp || !user.resetPasswordExpires) {
+      console.log(`No OTP set for user: ${email}`);
+      return res.status(400).json({ error: "No OTP requested or OTP expired" });
+    }
+
+    if (user.resetPasswordExpires < Date.now()) {
+      console.log(`OTP expired for ${email}: expires=${user.resetPasswordExpires}, now=${Date.now()}`);
+      return res.status(400).json({ error: "Expired OTP" });
+    }
+
+    if (user.resetPasswordOtp !== otp) {
+      console.log(`Invalid OTP for ${email}: provided=${otp}, stored=${user.resetPasswordOtp}`);
+      return res.status(400).json({ error: "Invalid OTP" });
     }
 
     user.password = newPassword; // bcrypt hashing handled by pre-save middleware
@@ -1041,12 +1059,24 @@ app.post("/api/auth/reset-password", async (req, res) => {
     user.resetPasswordExpires = undefined;
     await user.save();
 
-    await transporter.sendMail({
-      from: `"ACEM" <${process.env.EMAIL_USER}>`,
-      to: user.email,
-      subject: "ACEM Password Reset Successful",
-      text: `Your password has been successfully reset. If you did not perform this action, please contact support immediately.`,
-    });
+    try {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: user.email,
+        subject: "ACEM Password Reset Successful",
+        text: `Your password has been successfully reset. If you did not perform this action, please contact support immediately.`,
+        html: `<p>Your password has been successfully reset.</p>
+               <p>If you did not perform this action, please contact support immediately.</p>`,
+      });
+      console.log(`Password reset confirmation email sent to ${email}`);
+    } catch (emailErr) {
+      console.error("Error sending password reset confirmation email:", {
+        message: emailErr.message,
+        stack: emailErr.stack,
+        email,
+      });
+      // Don't fail the request if email fails
+    }
 
     console.log(`Password reset successfully for ${email}`);
     res.json({ message: "Password reset successfully" });
