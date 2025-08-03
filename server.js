@@ -5470,6 +5470,46 @@ app.get("/api/landing/clubs", async (req, res) => {
   }
 });
 
+app.get("/api/events/past", async (req, res) => {
+  try {
+    const today = new Date();
+    const pastEvents = await Event.find({
+      date: { $lt: today },
+      status: "active",
+    })
+      .select("name description date images")
+      .lean();
+
+    const eventsWithImages = pastEvents.map((event) => ({
+      _id: event._id,
+      name: event.name || "Unnamed Event",
+      description: event.description || "No description available.",
+      date: event.date,
+      images: event.images?.length
+        ? event.images.map((img, idx) => ({
+            path: img || `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/image${idx + 1}.jpg`,
+            description: `Photo from ${event.name} - ${idx + 1}`,
+          }))
+        : [
+            {
+              path: `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/default.jpg`,
+              description: `Default photo for ${event.name}`,
+            },
+          ],
+    }));
+
+    res.json({ events: eventsWithImages });
+  } catch (err) {
+    console.error("Error fetching past events:", {
+      message: err.message,
+      stack: err.stack,
+      path: req.path,
+      method: req.method,
+    });
+    res.status(500).json({ error: "Server error in fetching past events" });
+  }
+});
+
 // Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
