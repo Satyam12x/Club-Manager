@@ -88,6 +88,8 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "Name is required"],
       trim: true,
+      minlength: [2, "Name must be at least 2 characters"],
+      maxlength: [50, "Name cannot exceed 50 characters"],
     },
     email: {
       type: String,
@@ -99,6 +101,7 @@ const userSchema = new mongoose.Schema(
         /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
         "Please enter a valid email address",
       ],
+      index: true, // Add index for faster queries
     },
     pendingEmail: {
       type: String,
@@ -108,15 +111,26 @@ const userSchema = new mongoose.Schema(
         /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
         "Please enter a valid email address",
       ],
+      sparse: true, // Allow null values without uniqueness conflicts
     },
     password: {
       type: String,
       required: [true, "Password is required"],
       minlength: [6, "Password must be at least 6 characters"],
     },
-    resetPasswordOtp: { type: String },
-    resetPasswordExpires: { type: Number },
-    failedOtpAttempts: { type: Number, default: 0 },
+    resetPasswordOtp: {
+      type: String,
+      select: false, // Exclude from queries by default for security
+    },
+    resetPasswordExpires: {
+      type: Number,
+      select: false,
+    },
+    failedOtpAttempts: {
+      type: Number,
+      default: 0,
+      select: false,
+    },
     phone: {
       type: String,
       required: false,
@@ -125,6 +139,12 @@ const userSchema = new mongoose.Schema(
         /^\+?[1-9]\d{1,14}$/,
         "Please enter a valid phone number (e.g., +1234567890)",
       ],
+      validate: {
+        validator: function (v) {
+          return v ? /^\+?[1-9]\d{1,14}$/.test(v) : true; // Allow empty string
+        },
+        message: "Please enter a valid phone number (e.g., +1234567890)",
+      },
     },
     rollNo: {
       type: String,
@@ -132,31 +152,60 @@ const userSchema = new mongoose.Schema(
       unique: true,
       sparse: true,
       trim: true,
+      match: [
+        /^[A-Za-z0-9-]{1,20}$/,
+        "Roll number must be alphanumeric and up to 20 characters",
+      ],
+      index: true, // Add index for faster queries
     },
     isACEMStudent: {
       type: Boolean,
       required: [true, "ACEM student status is required"],
+      default: false,
     },
     collegeName: {
       type: String,
-      required: false,
+      required: function () {
+        return !this.isACEMStudent; // Required only for non-ACEM students
+      },
       trim: true,
+      maxlength: [100, "College name cannot exceed 100 characters"],
     },
     semester: {
       type: Number,
       min: [1, "Semester must be between 1 and 8"],
       max: [8, "Semester must be between 1 and 8"],
-      required: false,
+      required: function () {
+        return this.isACEMStudent; // Required for ACEM students
+      },
     },
     course: {
       type: String,
-      enum: ["BTech", "BCA", "BBA", "MBA"],
-      required: false,
+      enum: {
+        values: ["BTech", "BCA", "BBA", "MBA"],
+        message: "Course must be one of: BTech, BCA, BBA, MBA",
+      },
+      required: function () {
+        return this.isACEMStudent; // Required for ACEM students
+      },
     },
     specialization: {
       type: String,
       required: false,
       trim: true,
+      maxlength: [50, "Specialization cannot exceed 50 characters"],
+    },
+    profilePicture: {
+      type: String,
+      required: false,
+      trim: true,
+      validate: {
+        validator: function (v) {
+          // Allow empty string or valid URL
+          return !v || /^https?:\/\/[^\s/$.?#].[^\s]*$/.test(v);
+        },
+        message: "Profile picture must be a valid URL",
+      },
     },
     isClubMember: {
       type: Boolean,
@@ -166,6 +215,7 @@ const userSchema = new mongoose.Schema(
       {
         type: String,
         trim: true,
+        maxlength: [50, "Club name cannot exceed 50 characters"],
       },
     ],
     clubs: [
@@ -192,11 +242,14 @@ const userSchema = new mongoose.Schema(
       {
         type: String,
         trim: true,
+        maxlength: [50, "Club name cannot exceed 50 characters"],
       },
     ],
   },
   {
     timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
   }
 );
 
@@ -1090,8 +1143,7 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
     }
 
     console.log(
-      `Verifying OTP for ${normalizedEmail}: provided=${otp}, stored=${
-        user.resetPasswordOtp
+      `Verifying OTP for ${normalizedEmail}: provided=${otp}, stored=${user.resetPasswordOtp
       }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
 
@@ -1102,8 +1154,7 @@ app.post("/api/auth/verify-reset-otp", async (req, res) => {
 
     if (user.resetPasswordExpires < Date.now()) {
       console.log(
-        `OTP expired for ${normalizedEmail}: expires=${
-          user.resetPasswordExpires
+        `OTP expired for ${normalizedEmail}: expires=${user.resetPasswordExpires
         }, now=${Date.now()}`
       );
       return res.status(400).json({ error: "Expired OTP" });
@@ -1148,8 +1199,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   const { email, otp, newPassword } = req.body;
   if (!email || !otp || !newPassword || !/^\d{6}$/.test(otp)) {
     console.log(
-      `Missing or invalid fields: email=${email}, otp=${otp}, newPassword=${
-        newPassword ? "[provided]" : "missing"
+      `Missing or invalid fields: email=${email}, otp=${otp}, newPassword=${newPassword ? "[provided]" : "missing"
       }`
     );
     return res
@@ -1174,8 +1224,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
     }
 
     console.log(
-      `Resetting password for ${normalizedEmail}: provided OTP=${otp}, stored OTP=${
-        user.resetPasswordOtp
+      `Resetting password for ${normalizedEmail}: provided OTP=${otp}, stored OTP=${user.resetPasswordOtp
       }, expires=${user.resetPasswordExpires}, now=${Date.now()}`
     );
 
@@ -1186,8 +1235,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
     if (user.resetPasswordExpires < Date.now()) {
       console.log(
-        `OTP expired for ${normalizedEmail}: expires=${
-          user.resetPasswordExpires
+        `OTP expired for ${normalizedEmail}: expires=${user.resetPasswordExpires
         }, now=${Date.now()}`
       );
       user.resetPasswordOtp = undefined;
@@ -1261,7 +1309,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
 // User Profile Update
 app.put('/api/auth/user', authenticateToken, async (req, res) => {
-  const { name, email, phone, semester, course, specialization, rollNo } = req.body;
+  const { name, email, phone, isACEMStudent, semester, course, specialization, rollNo, collegeName } = req.body;
 
   // Validate required fields
   if (!name || !name.trim()) {
@@ -1269,6 +1317,12 @@ app.put('/api/auth/user', authenticateToken, async (req, res) => {
   }
   if (!email || !email.trim()) {
     return res.status(400).json({ error: 'Email is required' });
+  }
+  if (isACEMStudent === undefined) {
+    return res.status(400).json({ error: 'ACEM student status is required' });
+  }
+  if (!isACEMStudent && (!collegeName || !collegeName.trim())) {
+    return res.status(400).json({ error: 'College name is required for non-ACEM students' });
   }
 
   try {
@@ -1284,80 +1338,51 @@ app.put('/api/auth/user', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
 
-    // Prepare update object with allowed fields
+    // Prepare update object with only provided fields
     const updateFields = {
       name: name.trim(),
-      phone: phone ? phone.trim() : undefined,
-      semester: semester ? Number(semester) : undefined,
-      course: course ? course.trim() : undefined,
-      specialization: specialization ? specialization.trim() : undefined,
-      rollNo: rollNo ? rollNo.trim() : undefined,
+      email: email.trim(),
+      isACEMStudent,
     };
+    if (phone) updateFields.phone = phone.trim();
+    if (semester) updateFields.semester = String(semester).trim();
+    if (course) updateFields.course = course.trim();
+    if (specialization) updateFields.specialization = specialization.trim();
+    if (rollNo) updateFields.rollNo = rollNo.trim();
+    if (!isACEMStudent && collegeName) updateFields.collegeName = collegeName.trim();
+    else if (isACEMStudent) updateFields.collegeName = null;
 
     // Log the update payload
-    console.log(`Processing update for user ${req.user.id} with fields:`, updateFields);
+    console.log(`Updating user ${req.user.id} with fields:`, updateFields);
 
-    // Check if email has changed
-    if (email.trim().toLowerCase() !== req.user.email.toLowerCase()) {
-      // Validate new email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        return res.status(400).json({ error: 'Invalid email format' });
-      }
-
-      // Check for duplicate email
-      const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
+    // Check for duplicate email
+    if (email !== req.user.email) {
+      const existingUser = await User.findOne({ email });
       if (existingUser) {
         console.log(`Email already in use: ${email}`);
         return res.status(400).json({ error: 'Email already in use' });
       }
-
-      // Generate OTP and set expiration (5 minutes)
-      const otp = generateOtp();
-      const otpExpires = Date.now() + 5 * 60 * 1000; // 5 minutes from now
-
-      // Update user with pending email and OTP
-      await User.findByIdAndUpdate(
-        req.user.id,
-        {
-          $set: {
-            ...updateFields,
-            pendingEmail: email.trim().toLowerCase(),
-            resetPasswordOtp: otp,
-            resetPasswordExpires: otpExpires,
-            failedOtpAttempts: 0,
-          },
-        },
-        { new: true, runValidators: true }
-      );
-
-      // Send OTP email
-      const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: email.trim(),
-        subject: 'Email Verification OTP',
-        text: `Your OTP for verifying your new email address is ${otp}. It is valid for 5 minutes.`,
-      };
-
-      await transporter.sendMail(mailOptions);
-      console.log(`OTP sent to ${email} for user ${req.user.id}`);
-
-      return res.status(200).json({
-        message: 'OTP sent to new email. Please verify to complete the update.',
-        requiresOtp: true,
-      });
     }
 
-    // If email hasn't changed, update directly
+    // Update user with specific fields, bypassing full document validation
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { $set: updateFields },
-      { new: true, runValidators: true, select: '_id name email phone semester course specialization rollNo isACEMStudent collegeName' }
+      { new: true, runValidators: true, select: '_id name email phone isACEMStudent semester course specialization rollNo collegeName' }
     );
 
     if (!user) {
       console.log(`User not found for ID: ${req.user.id}`);
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Update headCoordinators if email changed
+    if (email !== req.user.email) {
+      const updateResult = await Club.updateMany(
+        { headCoordinators: req.user.email },
+        { $set: { 'headCoordinators.$': email } }
+      );
+      console.log(`Updated headCoordinators for ${updateResult.modifiedCount} clubs`);
     }
 
     // Generate new JWT
@@ -1374,11 +1399,11 @@ app.put('/api/auth/user', authenticateToken, async (req, res) => {
         name: user.name,
         email: user.email,
         phone: user.phone,
+        isACEMStudent: user.isACEMStudent,
         semester: user.semester,
         course: user.course,
         specialization: user.specialization,
         rollNo: user.rollNo,
-        isACEMStudent: user.isACEMStudent,
         collegeName: user.collegeName,
       },
       token,
@@ -1393,7 +1418,7 @@ app.put('/api/auth/user', authenticateToken, async (req, res) => {
     });
 
     if (err.code === 11000) {
-      return res.status(400).json({ error: 'Duplicate key error: email, phone, or rollNo already exists' });
+      return res.status(400).json({ error: 'Duplicate key error: email or phone already exists' });
     }
 
     if (err.name === 'ValidationError') {
@@ -1509,6 +1534,84 @@ app.post('/api/auth/verify-email-otp', authenticateToken, async (req, res) => {
   }
 });
 
+//profile pic update
+app.post(
+  "/api/auth/upload-profile-picture",
+  authenticateToken,
+  upload.single("profilePicture"),
+  async (req, res) => {
+    try {
+      console.log('Request headers:', req.headers);
+
+      if (!req.file) {
+        console.error('No file uploaded in request');
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      if (!req.user || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+        console.error(`Invalid user ID: ${req.user?.id || 'undefined'}`);
+        return res.status(400).json({ error: "Invalid user ID" });
+      }
+
+      console.log('Uploading file:', {
+        originalFilename: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+      });
+
+      const imageUrl = await uploadToCloudinary(req.file.buffer, "profile_pictures");
+
+      const user = await User.findByIdAndUpdate(
+        req.user.id,
+        { profilePicture: imageUrl },
+        { new: true, runValidators: true, select: "profilePicture name email" }
+      );
+
+      if (!user) {
+        console.error(`User not found for ID: ${req.user.id}`);
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      console.log('Updated user document:', {
+        id: user._id,
+        profilePicture: user.profilePicture,
+        name: user.name,
+        email: user.email,
+      });
+
+      res.json({
+        message: "Profile picture uploaded successfully",
+        profilePicture: user.profilePicture,
+      });
+    } catch (err) {
+      console.error("Profile picture upload error:", {
+        message: err.message,
+        stack: err.stack,
+        userId: req.user?.id,
+      });
+
+      if (err.message.includes("Only JPEG, PNG, GIF, WebP, BMP, TIFF, HEIC, and HEIF images are allowed")) {
+        return res.status(400).json({ error: err.message });
+      }
+
+      if (err.message.includes("File too large")) {
+        return res.status(400).json({ error: "File size exceeds 5MB limit" });
+      }
+
+      if (err.name === 'ValidationError') {
+        return res.status(400).json({
+          error: "Database validation error",
+          details: Object.values(err.errors).map(e => e.message),
+        });
+      }
+
+      res.status(500).json({
+        error: "Server error in profile picture upload",
+        details: err.message,
+      });
+    }
+  }
+);
 // User Details Endpoint (POST)
 app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
   try {
@@ -1694,23 +1797,56 @@ app.delete("/api/auth/delete-account", authenticateToken, async (req, res) => {
 });
 
 // Get User Data
-app.get("/api/auth/user", authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id)
-      .select(
-        "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo isACEMStudent collegeName"
-      )
-      .populate("clubs", "name");
-    if (!user) return res.status(404).json({ error: "User not found" });
-    res.json(user);
-  } catch (err) {
-    console.error("Error fetching user:", {
-      message: err.message,
-      stack: err.stack,
-    });
-    res.status(500).json({ error: "Server error in fetching user data" });
+app.get(
+  "/api/auth/user",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      // Validate user ID
+      if (!req.user || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+        console.error(`Invalid user ID: ${req.user?.id || 'undefined'}`);
+        return res.status(400).json({ error: "Invalid user ID" });
+      }
+
+      // Fetch user from database
+      const user = await User.findById(req.user.id)
+        .select(
+          "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo isACEMStudent collegeName profilePicture"
+        )
+        .populate("clubs", "name");
+
+      if (!user) {
+        console.error(`User not found for ID: ${req.user.id}`);
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Log retrieved user data for debugging
+      console.log('Retrieved user data:', {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+      });
+
+      res.json(user);
+    } catch (err) {
+      console.error("Error fetching user:", {
+        message: err.message,
+        stack: err.stack,
+        userId: req.user?.id,
+      });
+
+      if (err.name === 'CastError') {
+        return res.status(400).json({ error: "Invalid user ID format" });
+      }
+
+      res.status(500).json({
+        error: "Server error in fetching user data",
+        details: err.message,
+      });
+    }
   }
-});
+);
 
 // Get All Users (Admin only)
 app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
@@ -3268,9 +3404,8 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
       [
         {
           userId: req.user.id,
-          message: `You have successfully registered for the ${event.category.toLowerCase()} "${
-            event.title
-          }" in ${event.club.name}.`,
+          message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title
+            }" in ${event.club.name}.`,
           type: "event",
         },
       ],
@@ -3292,15 +3427,13 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
               <p>Event Time: ${event.time}</p>
               <p>Location: ${event.location}</p>
               <p>Registration Ends: ${new Date(
-                event.registrationEnds
-              ).toLocaleDateString()}</p>
-              ${
-                event.hasRegistrationFee
-                  ? `<p>Payment Amount: ${
-                      isACEMStudent ? event.acemFee : event.nonAcemFee
-                    } INR</p>`
-                  : ""
-              }
+            event.registrationEnds
+          ).toLocaleDateString()}</p>
+              ${event.hasRegistrationFee
+              ? `<p>Payment Amount: ${isACEMStudent ? event.acemFee : event.nonAcemFee
+              } INR</p>`
+              : ""
+            }
               <p>Scan the QR code below to verify your registration:</p>
               <img src="${qrCode}" alt="Registration QR Code" />
             `,
@@ -3459,9 +3592,8 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
       [
         {
           userId,
-          message: `You have successfully registered for the ${event.category.toLowerCase()} "${
-            event.title
-          }" in ${event.club.name}.`,
+          message: `You have successfully registered for the ${event.category.toLowerCase()} "${event.title
+            }" in ${event.club.name}.`,
           type: "event",
         },
       ],
@@ -3479,13 +3611,11 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
             <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
             <p>Event Time: ${event.time}</p>
             <p>Location: ${event.location}</p>
-            ${
-              event.hasRegistrationFee
-                ? `<p>Payment Amount: ${
-                    isACEMStudent ? event.acemFee : event.nonAcemFee
-                  } INR</p>`
-                : ""
-            }
+            ${event.hasRegistrationFee
+            ? `<p>Payment Amount: ${isACEMStudent ? event.acemFee : event.nonAcemFee
+            } INR</p>`
+            : ""
+          }
             <p>Scan the QR code below to verify your registration:</p>
             <img src="${qrCode}" alt="Registration QR Code" />
           `,
@@ -4169,11 +4299,9 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${
-            eventDoc.title
-          }" on ${date} has been marked as ${entry.status} (${
-            entry.status === "present" ? "5 points" : "0 points"
-          }).`,
+          message: `Your attendance for "${eventDoc.title
+            }" on ${date} has been marked as ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"
+            }).`,
           type: "attendance",
         });
       }
@@ -4325,11 +4453,9 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${event.title}" on ${
-            attendanceRecord.date.toISOString().split("T")[0]
-          } has been updated to ${entry.status} (${
-            entry.status === "present" ? "5 points" : "0 points"
-          }).`,
+          message: `Your attendance for "${event.title}" on ${attendanceRecord.date.toISOString().split("T")[0]
+            } has been updated to ${entry.status} (${entry.status === "present" ? "5 points" : "0 points"
+            }).`,
           type: "attendance",
         });
       }
@@ -4497,13 +4623,11 @@ app.post(
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: user.email,
           subject: `Added to ${club.name}`,
-          text: `You have been added to ${
-            club.name
-          } as a member. Please log in to the ACEM platform to view details${
-            user.password
+          text: `You have been added to ${club.name
+            } as a member. Please log in to the ACEM platform to view details${user.password
               ? ". Your temporary password is 'defaultPassword123'. Please reset it upon login."
               : "."
-          }`,
+            }`,
         });
       } catch (emailErr) {
         console.error("Error sending email to new member:", {
@@ -4662,11 +4786,9 @@ app.get(
                 ],
               }),
               new Paragraph({
-                text: `Stats: Present: ${
-                  attendanceRecord.stats?.presentCount || 0
-                }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${
-                  attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
-                }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
+                text: `Stats: Present: ${attendanceRecord.stats?.presentCount || 0
+                  }, Absent: ${attendanceRecord.stats?.absentCount || 0}, Rate: ${attendanceRecord.stats?.attendanceRate?.toFixed(2) || 0
+                  }%, Total Points: ${attendanceRecord.stats?.totalPoints || 0}`,
                 spacing: { after: 200 },
               }),
             ],
@@ -4883,9 +5005,8 @@ app.post(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${
-            entry.status
-          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been marked as ${entry.status
+            } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -5197,9 +5318,8 @@ app.put(
       for (const entry of validAttendance) {
         await Notification.create({
           userId: entry.userId,
-          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${
-            entry.status
-          } (${entry.status === "present" ? "3 points" : "0 points"}).`,
+          message: `Your attendance for "${title}" on ${formattedDate} in room ${roomNo} has been updated to ${entry.status
+            } (${entry.status === "present" ? "3 points" : "0 points"}).`,
           type: "attendance",
         });
       }
@@ -5276,13 +5396,12 @@ app.get(
               }),
               ...(startDate || endDate
                 ? [
-                    new Paragraph({
-                      text: `Date Range: ${startDate || "N/A"} to ${
-                        endDate || "N/A"
+                  new Paragraph({
+                    text: `Date Range: ${startDate || "N/A"} to ${endDate || "N/A"
                       }`,
-                      spacing: { after: 200 },
-                    }),
-                  ]
+                    spacing: { after: 200 },
+                  }),
+                ]
                 : []),
               new Paragraph({
                 text: "Event Attendance",
@@ -5291,9 +5410,8 @@ app.get(
               }),
               ...eventAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Event: ${
-                    record.event.title
-                  } | Date: ${record.date.toLocaleDateString()}`,
+                  text: `Event: ${record.event.title
+                    } | Date: ${record.date.toLocaleDateString()}`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -5358,13 +5476,11 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(
-                    2
-                  )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -5375,11 +5491,9 @@ app.get(
               }),
               ...practiceAttendance.flatMap((record) => [
                 new Paragraph({
-                  text: `Practice: ${
-                    record.title
-                  } | Date: ${record.date.toLocaleDateString()} | Room: ${
-                    record.roomNo
-                  }`,
+                  text: `Practice: ${record.title
+                    } | Date: ${record.date.toLocaleDateString()} | Room: ${record.roomNo
+                    }`,
                   heading: HeadingLevel.HEADING_3,
                 }),
                 new Table({
@@ -5444,13 +5558,11 @@ app.get(
                   ],
                 }),
                 new Paragraph({
-                  text: `Stats: Present: ${
-                    record.stats.presentCount
-                  }, Absent: ${
-                    record.stats.absentCount
-                  }, Rate: ${record.stats.attendanceRate.toFixed(
-                    2
-                  )}%, Total Points: ${record.stats.totalPoints}`,
+                  text: `Stats: Present: ${record.stats.presentCount
+                    }, Absent: ${record.stats.absentCount
+                    }, Rate: ${record.stats.attendanceRate.toFixed(
+                      2
+                    )}%, Total Points: ${record.stats.totalPoints}`,
                   spacing: { after: 200 },
                 }),
               ]),
@@ -5563,43 +5675,24 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
       { $project: { _id: 1, practicePoints: 1 } },
     ]);
 
-    // Fetch all users with relevant fields, including clubName, clubRoles, and avatar
+    // Fetch users who are club members with relevant fields
     const users = await User.find(
-      {},
-      "name email rollNo clubName clubRoles avatar"
+      { isClubMember: true },
+      "name email rollNo clubName profilePicture"
     ).lean();
 
-    // Combine points, user details, and filter by member roles
+    // Combine points and user details
     const pointsTable = users
       .map((user) => {
         // Ensure clubName is an array
         const clubNames = Array.isArray(user.clubName)
           ? user.clubName
           : user.clubName
-          ? [user.clubName]
-          : [];
+            ? [user.clubName]
+            : [];
 
-        // Construct clubRoles if not provided, defaulting to 'member' for each club
-        const clubRoles =
-          user.clubRoles ||
-          clubNames.map((clubName) => ({
-            clubName,
-            roles: ["member"],
-          }));
-
-        // Filter clubs where the user is only a member (exclude headCoordinator, admin, superAdmin)
-        const memberClubs = clubRoles
-          .filter(
-            (clubRole) =>
-              clubRole.roles.includes("member") &&
-              !clubRole.roles.includes("headCoordinator") &&
-              !clubRole.roles.includes("admin") &&
-              !clubRole.roles.includes("superAdmin")
-          )
-          .map((clubRole) => clubRole.clubName);
-
-        // Skip users with no member clubs
-        if (memberClubs.length === 0) return null;
+        // Skip users with no clubs
+        if (clubNames.length === 0) return null;
 
         const eventUserPoints =
           eventPoints.find((ep) => ep._id.toString() === user._id.toString())
@@ -5613,16 +5706,12 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
           name: user.name || "Unknown",
           email: user.email || "N/A",
           rollNo: user.rollNo || "N/A",
-          clubName: memberClubs,
-          clubRoles: clubRoles.map((role) => ({
-            clubName: role.clubName,
-            roles: Array.isArray(role.roles) ? role.roles : [role.roles],
-          })),
+          clubName: clubNames,
           totalPoints: eventUserPoints + practiceUserPoints,
-          avatar: user.avatar || "https://via.placeholder.com/60/60",
+          profilePicture: user.profilePicture || null,
         };
       })
-      .filter((user) => user !== null); // Remove users with no member clubs
+      .filter((user) => user !== null); // Remove users with no clubs
 
     // Sort by totalPoints in descending order
     pointsTable.sort((a, b) => b.totalPoints - a.totalPoints);
@@ -5753,9 +5842,8 @@ app.post("/api/landing/contact", async (req, res) => {
           from: `"ACEM" <${process.env.EMAIL_USER}>`,
           to: superAdminEmails,
           subject: `New Contact Message: ${subject || "General Inquiry"}`,
-          text: `A new contact message has been received.\n\nName: ${name}\nEmail: ${email}\nClub: ${
-            club || "None"
-          }\nMessage: ${message}`,
+          text: `A new contact message has been received.\n\nName: ${name}\nEmail: ${email}\nClub: ${club || "None"
+            }\nMessage: ${message}`,
         });
       } catch (emailErr) {
         console.error("Error sending contact message email:", {
@@ -5846,15 +5934,15 @@ app.get("/api/events/past", async (req, res) => {
       date: event.date,
       images: event.images?.length
         ? event.images.map((img, idx) => ({
-            path: img || `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/image${idx + 1}.jpg`,
-            description: `Photo from ${event.name} - ${idx + 1}`,
-          }))
+          path: img || `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/image${idx + 1}.jpg`,
+          description: `Photo from ${event.name} - ${idx + 1}`,
+        }))
         : [
-            {
-              path: `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/default.jpg`,
-              description: `Default photo for ${event.name}`,
-            },
-          ],
+          {
+            path: `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/default.jpg`,
+            description: `Default photo for ${event.name}`,
+          },
+        ],
     }));
 
     res.json({ events: eventsWithImages });
