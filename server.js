@@ -3648,46 +3648,160 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
 });
 
 //Contact form
-app.post("api/clubs/:id/contact", authenticateToken, async (req, res) => {
-  const { clubId } = req.params;
+app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
+  const { id: clubId } = req.params;
   const { message, coordinatorEmail } = req.body;
-
   try {
+    // Validate club ID
+    if (!mongoose.isValidObjectId(clubId)) {
+      console.error("Invalid club ID:", clubId);
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
     // Validate input
     if (!message || !message.trim()) {
+      console.error("Message is required:", { message });
       return res.status(400).json({ error: "Message is required" });
     }
     if (!coordinatorEmail) {
+      console.error("Coordinator email is required:", { coordinatorEmail });
       return res.status(400).json({ error: "Coordinator email is required" });
     }
-
-    // Find the club
-    const club = await Club.findById(clubId).populate("headCoordinators");
+    // Find the club with populated creator, superAdmins, and headCoordinators
+    const club = await Club.findById(clubId)
+      .populate("creator", "_id name email")
+      .populate("superAdmins", "_id name email")
+      .populate("headCoordinators", "_id name email phone");
     if (!club) {
+      console.error("Club not found:", clubId);
       return res.status(404).json({ error: "Club not found" });
     }
-
     // Verify coordinator
-    const coordinator = club.headCoordinators.find(
+    const allCoordinators = [
+      ...(club.superAdmins || []),
+      ...(club.headCoordinators || []),
+      club.creator,
+    ].filter(Boolean);
+    const coordinator = allCoordinators.find(
       (coord) => coord.email === coordinatorEmail
     );
     if (!coordinator) {
+      console.error("Coordinator not found:", coordinatorEmail);
       return res.status(404).json({ error: "Coordinator not found" });
     }
-
-    // Simulate sending email (replace with Nodemailer or other email service)
-    console.log(`Sending message to ${coordinator.email}:`, {
-      from: req.user.email,
+    // Save the message to the database
+    const contactMessage = new ContactMessage({
+      name: req.user.name,
+      email: req.user.email,
       message,
+      club: club.name,
+      coordinatorEmail,
+      status: "new",
+      priority: "medium",
+      isStarred: false,
+      createdAt: new Date(),
     });
-
-    // Optionally save the message to a database
-    // Example: await Message.create({ clubId, from: req.user._id, to: coordinator._id, message });
-
+    await contactMessage.save();
+    // Send email to coordinator
+    try {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: coordinator.email,
+        subject: `New Contact Message for ${club.name}`,
+        text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
+      });
+      console.log("Email sent to coordinator:", coordinator.email);
+    } catch (emailErr) {
+      console.error("Error sending email:", {
+        message: emailErr.message,
+        stack: emailErr.stack,
+      });
+      // Continue even if email fails, as message is saved
+    }
+    // Create notification for coordinator
+    await Notification.create({
+      userId: coordinator._id,
+      message: `New contact message from ${req.user.name} for ${club.name}`,
+      type: "contact",
+    });
     res.json({ message: "Message sent successfully" });
   } catch (error) {
-    console.error("Error sending message:", error);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error sending contact message:", {
+      message: error.message,
+      stack: error.stack,
+      clubId,
+      userId: req.user?.id,
+    });
+    res.status(500).json({ error: "Server error in sending contact message" });
+  }
+});
+
+// New GET /api/clubs/:id/contact-info
+app.get("/api/clubs/:id/contact-info", authenticateToken, async (req, res) => {
+  const { id: clubId } = req.params;
+  try {
+    // Validate club ID
+    if (!mongoose.isValidObjectId(clubId)) {
+      console.error("Invalid club ID:", clubId);
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+    // Find the club with populated creator, superAdmins, and headCoordinators
+    const club = await Club.findById(clubId)
+      .populate("creator", "_id name email")
+      .populate("superAdmins", "_id name email")
+      .populate("headCoordinators", "_id name email phone")
+      .lean();
+    if (!club) {
+      console.error("Club not found:", clubId);
+      return res.status(404).json({ error: "Club not found" });
+    }
+    // Prepare contact information
+    const contactInfo = {
+      creator: club.creator
+        ? {
+            _id: club.creator._id,
+            name: club.creator.name || "Unknown",
+            email: club.creator.email || "N/A",
+            role: "creator",
+          }
+        : null,
+      superAdmins: club.superAdmins
+        ? club.superAdmins.map((admin) => ({
+            _id: admin._id,
+            name: admin.name || "Unknown",
+            email: admin.email || "N/A",
+            role: "superAdmin",
+          }))
+        : [],
+      headCoordinators: club.headCoordinators
+        ? club.headCoordinators.map((coord) => ({
+            _id: coord._id,
+            name: coord.name || "Unknown",
+            email: coord.email || "N/A",
+            phone: coord.phone || "",
+            role: "headCoordinator",
+          }))
+        : [],
+      clubDetails: {
+        phone: club.phone || "8851020767",
+        room: club.room || "CSE Dept.",
+        timing: club.timing || "9 to 4",
+      },
+    };
+    console.log("Fetched contact info for club:", {
+      clubId,
+      name: club.name,
+      creator: contactInfo.creator,
+      superAdmins: contactInfo.superAdmins.map(a => a.email),
+      headCoordinators: contactInfo.headCoordinators.map(c => c.email),
+    });
+    res.json(contactInfo);
+  } catch (error) {
+    console.error("Error fetching club contact info:", {
+      message: error.message,
+      stack: error.stack,
+      clubId,
+    });
+    res.status(500).json({ error: "Server error in fetching contact information" });
   }
 });
 
