@@ -503,6 +503,38 @@ const contactMessageSchema = new mongoose.Schema({
 
 const ContactMessage = mongoose.model("ContactMessage", contactMessageSchema);
 
+const achievementSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  title: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  description: {
+    type: String,
+    trim: true,
+  },
+  icon: {
+    type: String,
+    default: "🏆",
+  },
+  dateEarned: {
+    type: Date,
+    default: Date.now,
+  },
+  clubId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Club",
+    required: false,
+  },
+});
+
+const Achievement = mongoose.model("Achievement", achievementSchema);
+
 // Nodemailer Transporter
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
@@ -3869,6 +3901,42 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
   }
 });
 
+// Get User's Registered Events
+app.get("/api/user/registered-events", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    if (!mongoose.isValidObjectId(userId)) {
+      console.error(`Invalid user ID: ${userId}`);
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    const events = await Event.find({ "registeredUsers.userId": userId })
+      .populate("club", "name icon")
+      .select(
+        "title description date time location banner category eventType registrationEnds"
+      )
+      .lean();
+
+    const formattedEvents = events.map((event) => ({
+      ...event,
+      club: event.club?.name || "Unknown Club",
+      clubIcon: event.club?.icon || null,
+      isUpcoming: new Date(event.date) > new Date(),
+      registrationOpen: new Date(event.registrationEnds) > new Date(),
+    }));
+
+    console.log(`Fetched ${formattedEvents.length} registered events for user: ${userId}`);
+    res.json(formattedEvents);
+  } catch (err) {
+    console.error("Error fetching registered events:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+    });
+    res.status(500).json({ error: "Server error in fetching registered events" });
+  }
+});
+
 //Contact form
 app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
   const { id: clubId } = req.params;
@@ -5764,8 +5832,164 @@ app.use((err, req, res, next) => {
 
 app.get("/api/points-table", authenticateToken, async (req, res) => {
   try {
-    // Aggregate event attendance points (5 points per present)
+    const { club } = req.query;
+    let userQuery = { isClubMember: true };
+    if (club) {
+      if (!mongoose.isValidObjectId(club)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+      userQuery.clubs = club;
+    }
     const eventPoints = await Attendance.aggregate([
+      { $match: club ? { club: new mongoose.Types.ObjectId(club) } : {} },
+      { $unwind: "$attendance" },
+      { $match: { "attendance.status": "present" } },
+      {
+        $group: {
+          _id: "$attendance.userId",
+          eventPoints: { $sum: 5 },
+          lastEventUpdate: { $max: "$date" },
+        },
+      },
+    ]);
+    const practicePoints = await PracticeAttendance.aggregate([
+      { $match: club ? { club: new mongoose.Types.ObjectId(club) } : {} },
+      { $unwind: "$attendance" },
+      { $match: { "attendance.status": "present" } },
+      {
+        $group: {
+          _id: "$attendance.userId",
+          practicePoints: { $sum: 3 },
+          lastPracticeUpdate: { $max: "$date" },
+        },
+      },
+    ]);
+    const users = await User.find(
+      userQuery,
+      "name email rollNo clubName clubs profilePicture"
+    ).lean();
+    if (!users.length) {
+      console.warn("No club members found for points table", { club });
+      return res.status(200).json([]);
+    }
+    const pointsTable = users
+      .map((user) => {
+        const clubNames = Array.isArray(user.clubName)
+          ? user.clubName
+          : user.clubName
+          ? [user.clubName]
+          : [];
+        if (clubNames.length === 0) return null;
+        const eventUserPoints = eventPoints.find(
+          (ep) => ep._id.toString() === user._id.toString()
+        );
+        const practiceUserPoints = practicePoints.find(
+          (pp) => pp._id.toString() === user._id.toString()
+        );
+        return {
+          userId: user._id.toString(),
+          name: user.name || "Unknown",
+          email: user.email || "N/A",
+          rollNo: user.rollNo || "N/A",
+          clubName: clubNames,
+          eventPoints: eventUserPoints?.eventPoints || 0,
+          practicePoints: practiceUserPoints?.practicePoints || 0,
+          totalPoints: (eventUserPoints?.eventPoints || 0) + (practiceUserPoints?.practicePoints || 0),
+          profilePicture: user.profilePicture || null,
+          lastUpdate: eventUserPoints?.lastEventUpdate || practiceUserPoints?.lastPracticeUpdate
+            ? new Date(
+                Math.max(
+                  eventUserPoints?.lastEventUpdate || 0,
+                  practiceUserPoints?.lastPracticeUpdate || 0
+                )
+              ).toISOString()
+            : null,
+        };
+      })
+      .filter((user) => user !== null)
+      .sort((a, b) => b.totalPoints - a.totalPoints);
+    console.log(`Member points table fetched, records: ${pointsTable.length}`, { club });
+    res.status(200).json(pointsTable);
+  } catch (err) {
+    console.error("Member points table error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      club,
+    });
+    res.status(500).json({ error: "Failed to fetch points table" });
+  }
+});
+
+app.get("/api/points/user", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const eventPoints = await Attendance.aggregate([
+      { $unwind: "$attendance" },
+      { $match: { "attendance.userId": new mongoose.Types.ObjectId(userId), "attendance.status": "present" } },
+      { $group: { _id: null, eventPoints: { $sum: 5 } } },
+    ]);
+    const practicePoints = await PracticeAttendance.aggregate([
+      { $unwind: "$attendance" },
+      { $match: { "attendance.userId": new mongoose.Types.ObjectId(userId), "attendance.status": "present" } },
+      { $group: { _id: null, practicePoints: { $sum: 3 } } },
+    ]);
+    const totalUsers = await User.countDocuments({ isClubMember: true });
+    const allPoints = await User.find({ isClubMember: true })
+      .lean()
+      .then(users =>
+        Promise.all(
+          users.map(async user => {
+            const ep = await Attendance.aggregate([
+              { $unwind: "$attendance" },
+              { $match: { "attendance.userId": new mongoose.Types.ObjectId(user._id), "attendance.status": "present" } },
+              { $group: { _id: null, eventPoints: { $sum: 5 } } },
+            ]);
+            const pp = await PracticeAttendance.aggregate([
+              { $unwind: "$attendance" },
+              { $match: { "attendance.userId": new mongoose.Types.ObjectId(user._id), "attendance.status": "present" } },
+              { $group: { _id: null, practicePoints: { $sum: 3 } } },
+            ]);
+            return {
+              userId: user._id.toString(),
+              totalPoints: (ep[0]?.eventPoints || 0) + (pp[0]?.practicePoints || 0),
+            };
+          })
+        )
+      );
+    const userPoints = {
+      eventPoints: eventPoints[0]?.eventPoints || 0,
+      practicePoints: practicePoints[0]?.practicePoints || 0,
+      totalPoints: (eventPoints[0]?.eventPoints || 0) + (practicePoints[0]?.practicePoints || 0),
+      rank:
+        allPoints
+          .sort((a, b) => b.totalPoints - a.totalPoints)
+          .findIndex(p => p.userId === userId) + 1,
+      totalUsers,
+    };
+    res.status(200).json(userPoints);
+  } catch (err) {
+    console.error("User points error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+    });
+    res.status(500).json({ error: "Failed to fetch user points" });
+  }
+});
+
+app.get("/api/points/club/:clubId", authenticateToken, async (req, res) => {
+  const { clubId } = req.params;
+  try {
+    if (!mongoose.isValidObjectId(clubId)) {
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+    const club = await Club.findById(clubId, "name").lean();
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+    const eventPoints = await Attendance.aggregate([
+      { $match: { club: new mongoose.Types.ObjectId(clubId) } },
       { $unwind: "$attendance" },
       { $match: { "attendance.status": "present" } },
       {
@@ -5774,11 +5998,9 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
           eventPoints: { $sum: 5 },
         },
       },
-      { $project: { _id: 1, eventPoints: 1 } },
     ]);
-
-    // Aggregate practice attendance points (3 points per present)
     const practicePoints = await PracticeAttendance.aggregate([
+      { $match: { club: new mongoose.Types.ObjectId(clubId) } },
       { $unwind: "$attendance" },
       { $match: { "attendance.status": "present" } },
       {
@@ -5787,61 +6009,40 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
           practicePoints: { $sum: 3 },
         },
       },
-      { $project: { _id: 1, practicePoints: 1 } },
     ]);
-
-    // Fetch users who are club members with relevant fields
     const users = await User.find(
-      { isClubMember: true },
-      "name email rollNo clubName profilePicture"
+      { clubs: clubId, isClubMember: true },
+      "name email rollNo profilePicture"
     ).lean();
-
-    // Combine points and user details
     const pointsTable = users
-      .map((user) => {
-        // Ensure clubName is an array
-        const clubNames = Array.isArray(user.clubName)
-          ? user.clubName
-          : user.clubName
-          ? [user.clubName]
-          : [];
-
-        // Skip users with no clubs
-        if (clubNames.length === 0) return null;
-
-        const eventUserPoints =
-          eventPoints.find((ep) => ep._id.toString() === user._id.toString())
-            ?.eventPoints || 0;
-        const practiceUserPoints =
-          practicePoints.find((pp) => pp._id.toString() === user._id.toString())
-            ?.practicePoints || 0;
-
+      .map(user => {
+        const eventUserPoints = eventPoints.find(
+          ep => ep._id.toString() === user._id.toString()
+        );
+        const practiceUserPoints = practicePoints.find(
+          pp => pp._id.toString() === user._id.toString()
+        );
         return {
           userId: user._id.toString(),
           name: user.name || "Unknown",
           email: user.email || "N/A",
           rollNo: user.rollNo || "N/A",
-          clubName: clubNames,
-          totalPoints: eventUserPoints + practiceUserPoints,
+          eventPoints: eventUserPoints?.eventPoints || 0,
+          practicePoints: practiceUserPoints?.practicePoints || 0,
+          totalPoints: (eventUserPoints?.eventPoints || 0) + (practiceUserPoints?.practicePoints || 0),
           profilePicture: user.profilePicture || null,
         };
       })
-      .filter((user) => user !== null); // Remove users with no clubs
-
-    // Sort by totalPoints in descending order
-    pointsTable.sort((a, b) => b.totalPoints - a.totalPoints);
-
-    // Log successful response
-    console.log(`Member points table fetched, records: ${pointsTable.length}`);
-
-    res.status(200).json(pointsTable);
+      .sort((a, b) => b.totalPoints - a.totalPoints);
+    res.status(200).json({ clubName: club.name, pointsTable });
   } catch (err) {
-    console.error("Member points table error:", {
+    console.error("Club points table error:", {
       message: err.message,
       stack: err.stack,
+      clubId,
       userId: req.user?._id,
     });
-    res.status(500).json({ error: "Server error fetching points table" });
+    res.status(500).json({ error: "Failed to fetch club points table" });
   }
 });
 
@@ -6075,6 +6276,39 @@ app.get("/api/events/past", async (req, res) => {
       method: req.method,
     });
     res.status(500).json({ error: "Server error in fetching past events" });
+  }
+});
+
+app.get("/api/achievements", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    const achievements = await Achievement.find({ userId })
+      .select("title description icon dateEarned clubId")
+      .populate("clubId", "name")
+      .lean();
+
+    const formattedAchievements = achievements.map((achievement) => ({
+      _id: achievement._id.toString(),
+      title: achievement.title,
+      description: achievement.description || "No description available",
+      icon: achievement.icon || "🏆",
+      dateEarned: achievement.dateEarned.toISOString(),
+      club: achievement.clubId?.name || "N/A",
+    }));
+
+    console.log(`Fetched ${formattedAchievements.length} achievements for user ${userId}`);
+    res.status(200).json(formattedAchievements);
+  } catch (err) {
+    console.error("Achievements fetch error:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+    });
+    res.status(500).json({ error: "Failed to fetch achievements" });
   }
 });
 
