@@ -13,6 +13,7 @@ const QRCode = require("qrcode");
 const fs = require("fs").promises;
 const { v2: cloudinary } = require("cloudinary");
 const streamifier = require("streamifier");
+const cron = require("node-cron");
 const {
   Document,
   Packer,
@@ -357,17 +358,48 @@ eventSchema.index({ club: 1, date: 1 });
 
 const Event = mongoose.model("Event", eventSchema);
 
-const notificationSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-  message: { type: String, required: true },
-  type: {
-    type: String,
-    enum: ["membership", "event", "activity", "general", "attendance"],
-    default: "general",
+const notificationSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true, // Optimize queries by userId
+    },
+    title: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: [3, "Title must be at least 3 characters"],
+      maxlength: [100, "Title cannot exceed 100 characters"],
+    },
+    message: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: [10, "Message must be at least 10 characters"],
+      maxlength: [500, "Message cannot exceed 500 characters"],
+    },
+    type: {
+      type: String,
+      enum: {
+        values: ["membership", "event", "activity", "general", "attendance"],
+        message:
+          "Type must be one of: membership, event, activity, general, attendance",
+      },
+      default: "general",
+    },
+    read: {
+      type: Boolean,
+      default: false,
+      index: true, // Optimize queries for unread notifications
+    },
   },
-  read: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now },
-});
+  { timestamps: true } // Adds createdAt and updatedAt
+);
+
+// Compound index for efficient unread notification queries
+notificationSchema.index({ userId: 1, read: 1 });
 
 const Notification = mongoose.model("Notification", notificationSchema);
 
@@ -2311,21 +2343,21 @@ app.delete(
         ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
         : [];
       const recipients = [...members.map((m) => m.email), ...superAdminEmails];
-      if (recipients.length > 0) {
-        try {
-          await transporter.sendMail({
-            from: `"ACEM" <${process.env.EMAIL_USER}>`,
-            to: recipients,
-            subject: `Club Deleted: ${club.name}`,
-            text: `The club "${club.name}" has been deleted by ${req.user.email}.`,
-          });
-        } catch (err) {
-          console.error("Error sending deletion notification email:", {
-            message: err.message,
-            stack: err.stack,
-          });
-        }
-      }
+      // if (recipients.length > 0) {
+      //   try {
+      //     await transporter.sendMail({
+      //       from: `"ACEM" <${process.env.EMAIL_USER}>`,
+      //       to: recipients,
+      //       subject: `Club Deleted: ${club.name}`,
+      //       text: `The club "${club.name}" has been deleted by ${req.user.email}.`,
+      //     });
+      //   } catch (err) {
+      //     console.error("Error sending deletion notification email:", {
+      //       message: err.message,
+      //       stack: err.stack,
+      //     });
+      //   }
+      // }
 
       for (const member of members) {
         await Notification.create({
@@ -2422,30 +2454,30 @@ app.post("/api/clubs/:id/join", authenticateToken, async (req, res) => {
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
     const recipients = [...(club.headCoordinators || []), ...superAdminEmails];
-    if (recipients.length > 0) {
-      try {
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: recipients,
-          subject: `New Membership Request for ${club.name}`,
-          text: `User ${user.name} (${user.email}) has requested to join ${club.name}.`,
-        });
-        console.log(
-          "POST /api/clubs/:id/join: Notification email sent to:",
-          recipients
-        );
-      } catch (err) {
-        console.error(
-          "POST /api/clubs/:id/join: Error sending membership request email:",
-          {
-            message: err.message,
-            stack: err.stack,
-            userId: user._id,
-            clubId: id,
-          }
-        );
-      }
-    }
+    // if (recipients.length > 0) {
+    //   try {
+    //     await transporter.sendMail({
+    //       from: `"ACEM" <${process.env.EMAIL_USER}>`,
+    //       to: recipients,
+    //       subject: `New Membership Request for ${club.name}`,
+    //       text: `User ${user.name} (${user.email}) has requested to join ${club.name}.`,
+    //     });
+    //     console.log(
+    //       "POST /api/clubs/:id/join: Notification email sent to:",
+    //       recipients
+    //     );
+    //   } catch (err) {
+    //     console.error(
+    //       "POST /api/clubs/:id/join: Error sending membership request email:",
+    //       {
+    //         message: err.message,
+    //         stack: err.stack,
+    //         userId: user._id,
+    //         clubId: id,
+    //       }
+    //     );
+    //   }
+    // }
 
     await Notification.create({
       userId: user._id,
@@ -2623,28 +2655,28 @@ app.patch(
         await targetUser.save();
         await club.save();
 
-        try {
-          await transporter.sendMail({
-            from: `"ACEM" <${process.env.EMAIL_USER}>`,
-            to: targetUser.email,
-            subject: `Membership Request Approved for ${club.name}`,
-            text: `Congratulations! Your request to join ${club.name} has been approved.`,
-          });
-          console.log(
-            "PATCH /api/membership-requests/:id: Approval email sent to:",
-            targetUser.email
-          );
-        } catch (err) {
-          console.error(
-            "PATCH /api/membership-requests/:id: Error sending approval email:",
-            {
-              message: err.message,
-              stack: err.stack,
-              userId: targetUser._id,
-              clubId: club._id,
-            }
-          );
-        }
+        // try {
+        //   await transporter.sendMail({
+        //     from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        //     to: targetUser.email,
+        //     subject: `Membership Request Approved for ${club.name}`,
+        //     text: `Congratulations! Your request to join ${club.name} has been approved.`,
+        //   });
+        //   console.log(
+        //     "PATCH /api/membership-requests/:id: Approval email sent to:",
+        //     targetUser.email
+        //   );
+        // } catch (err) {
+        //   console.error(
+        //     "PATCH /api/membership-requests/:id: Error sending approval email:",
+        //     {
+        //       message: err.message,
+        //       stack: err.stack,
+        //       userId: targetUser._id,
+        //       clubId: club._id,
+        //     }
+        //   );
+        // }
 
         await Notification.create({
           userId: targetUser._id,
@@ -2657,28 +2689,28 @@ app.patch(
         );
         await targetUser.save();
 
-        try {
-          await transporter.sendMail({
-            from: `"ACEM" <${process.env.EMAIL_USER}>`,
-            to: targetUser.email,
-            subject: `Membership Request Rejected for ${club.name}`,
-            text: `We regret to inform you that your request to join ${club.name} has been rejected.`,
-          });
-          console.log(
-            "PATCH /api/membership-requests/:id: Rejection email sent to:",
-            targetUser.email
-          );
-        } catch (err) {
-          console.error(
-            "PATCH /api/membership-requests/:id: Error sending rejection email:",
-            {
-              message: err.message,
-              stack: err.stack,
-              userId: targetUser._id,
-              clubId: club._id,
-            }
-          );
-        }
+        // try {
+        //   await transporter.sendMail({
+        //     from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        //     to: targetUser.email,
+        //     subject: `Membership Request Rejected for ${club.name}`,
+        //     text: `We regret to inform you that your request to join ${club.name} has been rejected.`,
+        //   });
+        //   console.log(
+        //     "PATCH /api/membership-requests/:id: Rejection email sent to:",
+        //     targetUser.email
+        //   );
+        // } catch (err) {
+        //   console.error(
+        //     "PATCH /api/membership-requests/:id: Error sending rejection email:",
+        //     {
+        //       message: err.message,
+        //       stack: err.stack,
+        //       userId: targetUser._id,
+        //       clubId: club._id,
+        //     }
+        //   );
+        // }
 
         await Notification.create({
           userId: targetUser._id,
@@ -2895,21 +2927,21 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
     const recipients = [...club.headCoordinators, ...superAdminEmails];
-    if (recipients.length > 0) {
-      try {
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: recipients,
-          subject: `Member Left: ${club.name}`,
-          text: `User ${user.name} (${user.email}) has left ${club.name}.`,
-        });
-      } catch (err) {
-        console.error("Error sending leave notification email:", {
-          message: err.message,
-          stack: err.stack,
-        });
-      }
-    }
+    // if (recipients.length > 0) {
+    //   try {
+    //     await transporter.sendMail({
+    //       from: `"ACEM" <${process.env.EMAIL_USER}>`,
+    //       to: recipients,
+    //       subject: `Member Left: ${club.name}`,
+    //       text: `User ${user.name} (${user.email}) has left ${club.name}.`,
+    //     });
+    //   } catch (err) {
+    //     console.error("Error sending leave notification email:", {
+    //       message: err.message,
+    //       stack: err.stack,
+    //     });
+    //   }
+    // }
 
     res.json({ message: "You have left the club successfully" });
   } catch (err) {
@@ -3858,28 +3890,28 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
       ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
     const recipients = [...(club.headCoordinators || []), ...superAdminEmails];
-    if (recipients.length > 0) {
-      try {
-        await transporter.sendMail({
-          from: `"ACEM" <${process.env.EMAIL_USER}>`,
-          to: recipients,
-          subject: `Member Left: ${club.name}`,
-          text: `User ${user.name} (${user.email}) has left ${club.name}.`,
-        });
-        console.log(
-          "POST /api/clubs/:id/leave: Notification email sent to:",
-          recipients
-        );
-      } catch (emailErr) {
-        console.error(
-          "POST /api/clubs/:id/leave: Error sending notification email:",
-          {
-            message: emailErr.message,
-            stack: emailErr.stack,
-          }
-        );
-      }
-    }
+    // if (recipients.length > 0) {
+    //   try {
+    //     await transporter.sendMail({
+    //       from: `"ACEM" <${process.env.EMAIL_USER}>`,
+    //       to: recipients,
+    //       subject: `Member Left: ${club.name}`,
+    //       text: `User ${user.name} (${user.email}) has left ${club.name}.`,
+    //     });
+    //     console.log(
+    //       "POST /api/clubs/:id/leave: Notification email sent to:",
+    //       recipients
+    //     );
+    //   } catch (emailErr) {
+    //     console.error(
+    //       "POST /api/clubs/:id/leave: Error sending notification email:",
+    //       {
+    //         message: emailErr.message,
+    //         stack: emailErr.stack,
+    //       }
+    //     );
+    //   }
+    // }
 
     await session.commitTransaction();
     console.log("POST /api/clubs/:id/leave: User successfully left club:", {
@@ -3925,7 +3957,9 @@ app.get("/api/user/registered-events", authenticateToken, async (req, res) => {
       registrationOpen: new Date(event.registrationEnds) > new Date(),
     }));
 
-    console.log(`Fetched ${formattedEvents.length} registered events for user: ${userId}`);
+    console.log(
+      `Fetched ${formattedEvents.length} registered events for user: ${userId}`
+    );
     res.json(formattedEvents);
   } catch (err) {
     console.error("Error fetching registered events:", {
@@ -3933,7 +3967,9 @@ app.get("/api/user/registered-events", authenticateToken, async (req, res) => {
       stack: err.stack,
       userId: req.user?.id,
     });
-    res.status(500).json({ error: "Server error in fetching registered events" });
+    res
+      .status(500)
+      .json({ error: "Server error in fetching registered events" });
   }
 });
 
@@ -3992,21 +4028,21 @@ app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
     });
     await contactMessage.save();
     // Send email to coordinator
-    try {
-      await transporter.sendMail({
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: coordinator.email,
-        subject: `New Contact Message for ${club.name}`,
-        text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
-      });
-      console.log("Email sent to coordinator:", coordinator.email);
-    } catch (emailErr) {
-      console.error("Error sending email:", {
-        message: emailErr.message,
-        stack: emailErr.stack,
-      });
-      // Continue even if email fails, as message is saved
-    }
+    // try {
+    //   await transporter.sendMail({
+    //     from: `"ACEM" <${process.env.EMAIL_USER}>`,
+    //     to: coordinator.email,
+    //     subject: `New Contact Message for ${club.name}`,
+    //     text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
+    //   });
+    //   console.log("Email sent to coordinator:", coordinator.email);
+    // } catch (emailErr) {
+    //   console.error("Error sending email:", {
+    //     message: emailErr.message,
+    //     stack: emailErr.stack,
+    //   });
+    //   // Continue even if email fails, as message is saved
+    // }
     // Create notification for coordinator
     await Notification.create({
       userId: coordinator._id,
@@ -4100,14 +4136,13 @@ app.get("/api/clubs/:id/contact-info", authenticateToken, async (req, res) => {
 // Get Notifications
 app.get("/api/notifications", authenticateToken, async (req, res) => {
   try {
-    const notifications = await Notification.find({ userId: req.user.id }).sort(
-      {
-        createdAt: -1,
-      }
-    );
+    const notifications = await Notification.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .select("title message type read createdAt");
     res.json(notifications);
   } catch (err) {
     console.error("Error fetching notifications:", {
+      userId: req.user?.id || "unknown",
       message: err.message,
       stack: err.stack,
     });
@@ -4121,29 +4156,239 @@ app.patch(
   authenticateToken,
   async (req, res) => {
     try {
+      // Validate req.user
+      if (!req.user?.id) {
+        console.error("No user ID in request", {
+          token: req.headers.authorization,
+        });
+        return res.status(401).json({ error: "User authentication failed" });
+      }
+
+      // Validate ObjectId
       if (!mongoose.isValidObjectId(req.params.id)) {
+        console.error("Invalid notification ID", {
+          notificationId: req.params.id,
+        });
         return res.status(400).json({ error: "Invalid notification ID" });
       }
 
+      // Find notification
       const notification = await Notification.findById(req.params.id);
       if (!notification) {
+        console.warn("Notification not found", {
+          notificationId: req.params.id,
+        });
         return res.status(404).json({ error: "Notification not found" });
       }
+
+      // Validate user authorization
+      if (!notification.userId) {
+        console.error("Notification missing userId", {
+          notificationId: req.params.id,
+        });
+        return res.status(500).json({ error: "Invalid notification data" });
+      }
       if (notification.userId.toString() !== req.user.id) {
+        console.warn("Unauthorized attempt to modify notification", {
+          userId: req.user.id,
+          notificationId: req.params.id,
+          notificationUserId: notification.userId.toString(),
+        });
         return res
           .status(403)
           .json({ error: "Not authorized to modify this notification" });
       }
 
+      // Update and save
       notification.read = true;
       await notification.save();
       res.json({ message: "Notification marked as read" });
     } catch (err) {
       console.error("Error marking notification as read:", {
+        userId: req.user?.id || "unknown",
+        notificationId: req.params.id,
+        message: err.message,
+        stack: err.stack,
+        mongoError: err.name === "MongoServerError" ? err.code : null,
+      });
+      res.status(500).json({ error: "Server error in updating notification" });
+    }
+  }
+);
+
+// Mark All Notifications as Read
+app.patch(
+  "/api/notifications/mark-all-read",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      if (!req.user?.id) {
+        console.error("No user ID in request", {
+          token: req.headers.authorization,
+        });
+        return res.status(401).json({ error: "User authentication failed" });
+      }
+
+      const result = await Notification.updateMany(
+        { userId: req.user.id, read: false },
+        { $set: { read: true } }
+      );
+      res.json({
+        message: `Marked ${result.modifiedCount} notifications as read`,
+      });
+    } catch (err) {
+      console.error("Error marking all notifications as read:", {
+        userId: req.user?.id || "unknown",
+        message: err.message,
+        stack: err.stack,
+        mongoError: err.name === "MongoServerError" ? err.code : null,
+      });
+      res
+        .status(500)
+        .json({ error: "Server error in marking all notifications as read" });
+    }
+  }
+);
+
+// Email Sending Function
+const sendNotificationEmail = async (user, notifications) => {
+  try {
+    const mailOptions = {
+      from: `"ACEM Notifications" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: `You Have ${notifications.length} Unread Notifications`,
+      html: `
+        <h2>Hello ${user.name},</h2>
+        <p>You have ${
+          notifications.length
+        } unread notifications in your ACEM account. Please review them at your earliest convenience:</p>
+        <ul style="list-style-type: none; padding: 0;">
+          ${notifications
+            .map(
+              (n) => `
+                <li style="margin-bottom: 20px; border-left: 4px solid #456882; padding-left: 10px;">
+                  <strong>${
+                    n.title
+                  }</strong> <span style="color: #666; font-size: 0.9em;">(${
+                n.type
+              })</span><br/>
+                  <p>${n.message}</p>
+                  <small>Received: ${new Date(n.createdAt).toLocaleString(
+                    "en-US",
+                    {
+                      timeZone: "Asia/Kolkata",
+                    }
+                  )}</small>
+                </li>
+              `
+            )
+            .join("")}
+        </ul>
+        <p>Visit <a href="http://localhost:3000/notifications">your notifications page</a> to view and manage these notifications.</p>
+        <p>Best regards,<br/>ACEM Team</p>
+      `,
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(
+      `Email sent to ${user.email} with ${notifications.length} unread notifications`
+    );
+  } catch (err) {
+    console.error("Error sending email:", {
+      userId: user._id,
+      email: user.email,
+      message: err.message,
+      stack: err.stack,
+    });
+  }
+};
+
+// Check and Send Emails for Unread Notifications
+const checkAndSendUnreadNotifications = async () => {
+  try {
+    console.log(
+      "Running unread notifications check at",
+      new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
+    );
+
+    const usersWithUnread = await Notification.aggregate([
+      { $match: { read: false } },
+      {
+        $group: {
+          _id: "$userId",
+          unreadCount: { $sum: 1 },
+        },
+      },
+      { $match: { unreadCount: { $gt: 5 } } },
+    ]);
+
+    if (usersWithUnread.length === 0) {
+      console.log("No users with more than 5 unread notifications");
+      return;
+    }
+
+    for (const userGroup of usersWithUnread) {
+      const user = await User.findById(userGroup._id).select("name email");
+      if (!user) {
+        console.warn(`User not found for ID: ${userGroup._id}`);
+        continue;
+      }
+
+      const notifications = await Notification.find({
+        userId: userGroup._id,
+        read: false,
+      })
+        .sort({ createdAt: -1 })
+        .select("title message type createdAt");
+
+      if (notifications.length > 5) {
+        await sendNotificationEmail(user, notifications);
+      }
+    }
+  } catch (err) {
+    console.error("Error in checkAndSendUnreadNotifications:", {
+      message: err.message,
+      stack: err.stack,
+      mongoError: err.name === "MongoServerError" ? err.code : null,
+    });
+  }
+};
+
+// Schedule the job to run daily at midnight IST
+cron.schedule(
+  "0 0 * * *",
+  () => {
+    checkAndSendUnreadNotifications();
+  },
+  {
+    timezone: "Asia/Kolkata",
+  }
+);
+
+// Manual Trigger Endpoint for Testing (Super-Admin Only)
+app.patch(
+  "/api/notifications/check-unread",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user.id);
+      if (!user || !user.isAdmin) {
+        return res.status(403).json({ error: "Super-admin access required" });
+      }
+
+      await checkAndSendUnreadNotifications();
+      res.json({
+        message: "Unread notifications check triggered successfully",
+      });
+    } catch (err) {
+      console.error("Error triggering unread notifications check:", {
+        userId: req.user?.id || "unknown",
         message: err.message,
         stack: err.stack,
       });
-      res.status(500).json({ error: "Server error in updating notification" });
+      res
+        .status(500)
+        .json({ error: "Server error in triggering notifications check" });
     }
   }
 );
@@ -4223,12 +4468,12 @@ app.post(
       message.status = "replied";
       await message.save();
 
-      await transporter.sendMail({
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: message.email,
-        subject: `Reply to Your Message for ${message.club}`,
-        text: `Dear ${message.name},\n\nWe have responded to your message:\n\nOriginal Message: ${message.message}\n\nReply: ${reply}\n\nBest regards,\n${club.name} Team`,
-      });
+      // await transporter.sendMail({
+      //   from: `"ACEM" <${process.env.EMAIL_USER}>`,
+      //   to: message.email,
+      //   subject: `Reply to Your Message for ${message.club}`,
+      //   text: `Dear ${message.name},\n\nWe have responded to your message:\n\nOriginal Message: ${message.message}\n\nReply: ${reply}\n\nBest regards,\n${club.name} Team`,
+      // });
 
       await Notification.create({
         userId: user._id,
@@ -4290,21 +4535,21 @@ app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
     });
     await contactMessage.save();
     // Send email to coordinator
-    try {
-      await transporter.sendMail({
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: coordinator.email,
-        subject: `New Contact Message for ${club.name}`,
-        text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
-      });
-      console.log("Email sent to coordinator:", coordinator.email);
-    } catch (emailErr) {
-      console.error("Error sending email:", {
-        message: emailErr.message,
-        stack: emailErr.stack,
-      });
-      // Continue even if email fails, as message is saved
-    }
+    // try {
+    //   await transporter.sendMail({
+    //     from: `"ACEM" <${process.env.EMAIL_USER}>`,
+    //     to: coordinator.email,
+    //     subject: `New Contact Message for ${club.name}`,
+    //     text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
+    //   });
+    //   console.log("Email sent to coordinator:", coordinator.email);
+    // } catch (emailErr) {
+    //   console.error("Error sending email:", {
+    //     message: emailErr.message,
+    //     stack: emailErr.stack,
+    //   });
+    //   // Continue even if email fails, as message is saved
+    // }
     res.json({ message: "Message sent successfully" });
   } catch (error) {
     console.error("Error sending contact message:", {
@@ -5894,21 +6139,27 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
           clubName: clubNames,
           eventPoints: eventUserPoints?.eventPoints || 0,
           practicePoints: practiceUserPoints?.practicePoints || 0,
-          totalPoints: (eventUserPoints?.eventPoints || 0) + (practiceUserPoints?.practicePoints || 0),
+          totalPoints:
+            (eventUserPoints?.eventPoints || 0) +
+            (practiceUserPoints?.practicePoints || 0),
           profilePicture: user.profilePicture || null,
-          lastUpdate: eventUserPoints?.lastEventUpdate || practiceUserPoints?.lastPracticeUpdate
-            ? new Date(
-                Math.max(
-                  eventUserPoints?.lastEventUpdate || 0,
-                  practiceUserPoints?.lastPracticeUpdate || 0
-                )
-              ).toISOString()
-            : null,
+          lastUpdate:
+            eventUserPoints?.lastEventUpdate ||
+            practiceUserPoints?.lastPracticeUpdate
+              ? new Date(
+                  Math.max(
+                    eventUserPoints?.lastEventUpdate || 0,
+                    practiceUserPoints?.lastPracticeUpdate || 0
+                  )
+                ).toISOString()
+              : null,
         };
       })
       .filter((user) => user !== null)
       .sort((a, b) => b.totalPoints - a.totalPoints);
-    console.log(`Member points table fetched, records: ${pointsTable.length}`, { club });
+    console.log(`Member points table fetched, records: ${pointsTable.length}`, {
+      club,
+    });
     res.status(200).json(pointsTable);
   } catch (err) {
     console.error("Member points table error:", {
@@ -5926,33 +6177,54 @@ app.get("/api/points/user", authenticateToken, async (req, res) => {
     const userId = req.user.id;
     const eventPoints = await Attendance.aggregate([
       { $unwind: "$attendance" },
-      { $match: { "attendance.userId": new mongoose.Types.ObjectId(userId), "attendance.status": "present" } },
+      {
+        $match: {
+          "attendance.userId": new mongoose.Types.ObjectId(userId),
+          "attendance.status": "present",
+        },
+      },
       { $group: { _id: null, eventPoints: { $sum: 5 } } },
     ]);
     const practicePoints = await PracticeAttendance.aggregate([
       { $unwind: "$attendance" },
-      { $match: { "attendance.userId": new mongoose.Types.ObjectId(userId), "attendance.status": "present" } },
+      {
+        $match: {
+          "attendance.userId": new mongoose.Types.ObjectId(userId),
+          "attendance.status": "present",
+        },
+      },
       { $group: { _id: null, practicePoints: { $sum: 3 } } },
     ]);
     const totalUsers = await User.countDocuments({ isClubMember: true });
     const allPoints = await User.find({ isClubMember: true })
       .lean()
-      .then(users =>
+      .then((users) =>
         Promise.all(
-          users.map(async user => {
+          users.map(async (user) => {
             const ep = await Attendance.aggregate([
               { $unwind: "$attendance" },
-              { $match: { "attendance.userId": new mongoose.Types.ObjectId(user._id), "attendance.status": "present" } },
+              {
+                $match: {
+                  "attendance.userId": new mongoose.Types.ObjectId(user._id),
+                  "attendance.status": "present",
+                },
+              },
               { $group: { _id: null, eventPoints: { $sum: 5 } } },
             ]);
             const pp = await PracticeAttendance.aggregate([
               { $unwind: "$attendance" },
-              { $match: { "attendance.userId": new mongoose.Types.ObjectId(user._id), "attendance.status": "present" } },
+              {
+                $match: {
+                  "attendance.userId": new mongoose.Types.ObjectId(user._id),
+                  "attendance.status": "present",
+                },
+              },
               { $group: { _id: null, practicePoints: { $sum: 3 } } },
             ]);
             return {
               userId: user._id.toString(),
-              totalPoints: (ep[0]?.eventPoints || 0) + (pp[0]?.practicePoints || 0),
+              totalPoints:
+                (ep[0]?.eventPoints || 0) + (pp[0]?.practicePoints || 0),
             };
           })
         )
@@ -5960,11 +6232,13 @@ app.get("/api/points/user", authenticateToken, async (req, res) => {
     const userPoints = {
       eventPoints: eventPoints[0]?.eventPoints || 0,
       practicePoints: practicePoints[0]?.practicePoints || 0,
-      totalPoints: (eventPoints[0]?.eventPoints || 0) + (practicePoints[0]?.practicePoints || 0),
+      totalPoints:
+        (eventPoints[0]?.eventPoints || 0) +
+        (practicePoints[0]?.practicePoints || 0),
       rank:
         allPoints
           .sort((a, b) => b.totalPoints - a.totalPoints)
-          .findIndex(p => p.userId === userId) + 1,
+          .findIndex((p) => p.userId === userId) + 1,
       totalUsers,
     };
     res.status(200).json(userPoints);
@@ -6015,12 +6289,12 @@ app.get("/api/points/club/:clubId", authenticateToken, async (req, res) => {
       "name email rollNo profilePicture"
     ).lean();
     const pointsTable = users
-      .map(user => {
+      .map((user) => {
         const eventUserPoints = eventPoints.find(
-          ep => ep._id.toString() === user._id.toString()
+          (ep) => ep._id.toString() === user._id.toString()
         );
         const practiceUserPoints = practicePoints.find(
-          pp => pp._id.toString() === user._id.toString()
+          (pp) => pp._id.toString() === user._id.toString()
         );
         return {
           userId: user._id.toString(),
@@ -6029,7 +6303,9 @@ app.get("/api/points/club/:clubId", authenticateToken, async (req, res) => {
           rollNo: user.rollNo || "N/A",
           eventPoints: eventUserPoints?.eventPoints || 0,
           practicePoints: practiceUserPoints?.practicePoints || 0,
-          totalPoints: (eventUserPoints?.eventPoints || 0) + (practiceUserPoints?.practicePoints || 0),
+          totalPoints:
+            (eventUserPoints?.eventPoints || 0) +
+            (practiceUserPoints?.practicePoints || 0),
           profilePicture: user.profilePicture || null,
         };
       })
@@ -6300,7 +6576,9 @@ app.get("/api/achievements", authenticateToken, async (req, res) => {
       club: achievement.clubId?.name || "N/A",
     }));
 
-    console.log(`Fetched ${formattedAchievements.length} achievements for user ${userId}`);
+    console.log(
+      `Fetched ${formattedAchievements.length} achievements for user ${userId}`
+    );
     res.status(200).json(formattedAchievements);
   } catch (err) {
     console.error("Achievements fetch error:", {
