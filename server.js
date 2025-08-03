@@ -1229,59 +1229,122 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 // User Profile Update
-app.put("/api/auth/user", authenticateToken, async (req, res) => {
-  const { name, email, phone, isACEMStudent } = req.body;
+app.put('/api/auth/user', authenticateToken, async (req, res) => {
+  const { name, email, phone, isACEMStudent, semester, course, specialization, rollNo, collegeName } = req.body;
+
+  // Validate required fields
   if (!name || !email || isACEMStudent === undefined) {
-    return res
-      .status(400)
-      .json({ error: "Name, email, and ACEM student status are required" });
+    return res.status(400).json({ error: 'Name, email, and ACEM student status are required' });
   }
 
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
+    // Verify req.user is set by middleware
+    if (!req.user?.id || !req.user?.email) {
+      console.error('Profile update error: Invalid user data from token', { user: req.user });
+      return res.status(401).json({ error: 'Invalid authentication token' });
     }
 
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
+      console.error(`Invalid user ID: ${req.user.id}`);
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+
+    // Find the user
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      console.log(`User not found for ID: ${req.user.id}`);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check for duplicate email
     if (email !== user.email) {
       const existingUser = await User.findOne({ email });
       if (existingUser) {
-        return res.status(400).json({ error: "Email already in use" });
+        console.log(`Email already in use: ${email}`);
+        return res.status(400).json({ error: 'Email already in use' });
       }
     }
 
+    // Update user fields
     user.name = name;
     user.email = email;
     user.phone = phone || user.phone;
     user.isACEMStudent = isACEMStudent;
-    await user.save();
+    user.semester = semester || user.semester;
+    user.course = course || user.course;
+    user.specialization = specialization || user.specialization;
+    user.rollNo = rollNo || user.rollNo;
+    user.collegeName = isACEMStudent ? null : collegeName || user.collegeName;
 
-    if (email !== req.user.email) {
-      await Club.updateMany(
-        { headCoordinators: req.user.email },
-        { $set: { "headCoordinators.$": email } }
+    // Ensure pendingClubs is valid (array of ObjectIds or empty)
+    if (user.pendingClubs && !Array.isArray(user.pendingClubs)) {
+      console.warn(`Invalid pendingClubs format for user ${req.user.id}:`, user.pendingClubs);
+      user.pendingClubs = [];
+    }
+    if (user.pendingClubs) {
+      user.pendingClubs = user.pendingClubs.filter((clubId) =>
+        mongoose.Types.ObjectId.isValid(clubId)
       );
     }
 
+    // Save user with validation
+    await user.save();
+
+    // Update headCoordinators in Club collection if email changed
+    if (email !== req.user.email) {
+      const updateResult = await Club.updateMany(
+        { headCoordinators: req.user.email },
+        { $set: { 'headCoordinators.$': email } }
+      );
+      console.log(`Updated headCoordinators for ${updateResult.modifiedCount} clubs`);
+    }
+
+    // Generate new JWT
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      {
-        expiresIn: "1d",
-      }
+      { expiresIn: '1d' }
     );
-    res.json({ message: "Profile updated successfully", user, token });
+
+    res.json({
+      message: 'Profile updated successfully',
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        isACEMStudent: user.isACEMStudent,
+        semester: user.semester,
+        course: user.course,
+        specialization: user.specialization,
+        rollNo: user.rollNo,
+        collegeName: user.collegeName,
+      },
+      token,
+    });
   } catch (err) {
-    console.error("Profile update error:", {
+    console.error('Profile update error:', {
       message: err.message,
       stack: err.stack,
+      userId: req.user?.id,
+      email: req.user?.email,
+      body: req.body,
     });
+
+    // Handle specific MongoDB errors
     if (err.code === 11000) {
-      return res
-        .status(400)
-        .json({ error: "Duplicate key error: email or phone already exists" });
+      return res.status(400).json({ error: 'Duplicate key error: email or phone already exists' });
     }
-    res.status(500).json({ error: "Server error in profile update" });
+
+    // Handle validation errors
+    if (err.name === 'ValidationError') {
+      const messages = Object.values(err.errors).map((e) => e.message).join(', ');
+      return res.status(400).json({ error: `Validation error: ${messages}` });
+    }
+
+    // Generic server error
+    res.status(500).json({ error: 'Server error in profile update' });
   }
 });
 
