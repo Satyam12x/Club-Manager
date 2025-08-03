@@ -2352,18 +2352,29 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
     const club = await Club.findById(req.params.id)
       .populate("superAdmins", "name email")
       .populate("members", "name email")
-      .populate("creator", "name email")
-      .populate("headCoordinators", "name email phone");
+      .populate("creator", "name email");
     if (!club) {
       return res.status(404).json({ error: "Club not found" });
     }
+
+    // Fetch head coordinator details
+    let headCoordinatorDetails = [];
+    if (club.headCoordinators && club.headCoordinators.length > 0) {
+      // Query User collection for users with matching emails
+      headCoordinatorDetails = await User.find(
+        { email: { $in: club.headCoordinators } },
+        "name email phone"
+      ).lean();
+    }
+
     const transformedClub = {
       ...club._doc,
       icon: club.icon || null,
       banner: club.banner || null,
       whatsappLink: club.whatsappLink || null,
       memberCount: club.members.length,
-      superAdmins: club.superAdmins || [], // Ensure superAdmins is always an array
+      superAdmins: club.superAdmins || [],
+      headCoordinators: headCoordinatorDetails, // Replace email strings with user details
     };
     res.json(transformedClub);
   } catch (err) {
@@ -2547,14 +2558,14 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
 
 // Create Event (Creator, Super Admin, or Head Coordinator only)
 app.post(
-  '/api/events',
+  "/api/events",
   authenticateToken,
-  upload.single('banner'),
+  upload.single("banner"),
   isHeadCoordinatorOrAdmin,
   async (req, res) => {
     try {
-      console.log('POST /api/events - req.body:', req.body); // Debug log
-      console.log('POST /api/events - req.file:', req.file); // Debug log
+      console.log("POST /api/events - req.body:", req.body); // Debug log
+      console.log("POST /api/events - req.file:", req.file); // Debug log
 
       const {
         title,
@@ -2585,56 +2596,76 @@ app.post(
         !registrationDate ||
         !registrationTime
       ) {
-        console.log('Missing required fields:', {
-          title, description, date, time, location, club, category, eventType,
-          registrationDate, registrationTime,
+        console.log("Missing required fields:", {
+          title,
+          description,
+          date,
+          time,
+          location,
+          club,
+          category,
+          eventType,
+          registrationDate,
+          registrationTime,
         });
         return res.status(400).json({
-          error: 'All required fields, including registration end date and time, must be provided',
+          error:
+            "All required fields, including registration end date and time, must be provided",
         });
       }
 
       // Validate club ID
       if (!mongoose.isValidObjectId(club)) {
-        console.log('Invalid club ID:', club);
-        return res.status(400).json({ error: 'Invalid club ID' });
+        console.log("Invalid club ID:", club);
+        return res.status(400).json({ error: "Invalid club ID" });
       }
 
       // Validate category
-      if (!['Seminar', 'Competition'].includes(category)) {
-        console.log('Invalid category:', category);
-        return res.status(400).json({ error: 'Invalid event category' });
+      if (!["Seminar", "Competition"].includes(category)) {
+        console.log("Invalid category:", category);
+        return res.status(400).json({ error: "Invalid event category" });
       }
 
       // Validate event type
-      if (!['Intra-College', 'Inter-College'].includes(eventType)) {
-        console.log('Invalid event type:', eventType);
-        return res.status(400).json({ error: 'Invalid event type' });
+      if (!["Intra-College", "Inter-College"].includes(eventType)) {
+        console.log("Invalid event type:", eventType);
+        return res.status(400).json({ error: "Invalid event type" });
       }
 
       // Validate dates
       const parsedDate = new Date(`${date}T${time}:00`);
-      const parsedRegistrationEnds = new Date(`${registrationDate}T${registrationTime}:00`);
-      if (isNaN(parsedDate.getTime()) || isNaN(parsedRegistrationEnds.getTime())) {
-        console.log('Invalid date/time:', { date, time, registrationDate, registrationTime });
+      const parsedRegistrationEnds = new Date(
+        `${registrationDate}T${registrationTime}:00`
+      );
+      if (
+        isNaN(parsedDate.getTime()) ||
+        isNaN(parsedRegistrationEnds.getTime())
+      ) {
+        console.log("Invalid date/time:", {
+          date,
+          time,
+          registrationDate,
+          registrationTime,
+        });
         return res.status(400).json({
-          error: 'Invalid date or time format for event or registration end',
+          error: "Invalid date or time format for event or registration end",
         });
       }
 
       // Ensure registration end date is not after event date
       if (parsedRegistrationEnds > parsedDate) {
-        console.log('Registration date after event date:', {
+        console.log("Registration date after event date:", {
           parsedRegistrationEnds,
           parsedDate,
         });
         return res.status(400).json({
-          error: 'Registration end date cannot be after event date',
+          error: "Registration end date cannot be after event date",
         });
       }
 
       // Validate registration fees for Inter-College events
-      const isFeeRequired = eventType === 'Inter-College' && hasRegistrationFee === 'true';
+      const isFeeRequired =
+        eventType === "Inter-College" && hasRegistrationFee === "true";
       if (isFeeRequired) {
         if (
           !acemFee ||
@@ -2644,47 +2675,52 @@ app.post(
           parseFloat(acemFee) < 0 ||
           parseFloat(nonAcemFee) < 0
         ) {
-          console.log('Invalid fees:', { acemFee, nonAcemFee });
+          console.log("Invalid fees:", { acemFee, nonAcemFee });
           return res.status(400).json({
-            error: 'Valid registration fees are required for Inter-College events',
+            error:
+              "Valid registration fees are required for Inter-College events",
           });
         }
       }
 
       // Verify user
-      console.log('Verifying user:', req.user.id);
+      console.log("Verifying user:", req.user.id);
       const user = await User.findById(req.user.id);
       if (!user) {
-        console.log('User not found:', req.user.id);
-        return res.status(404).json({ error: 'User not found' });
+        console.log("User not found:", req.user.id);
+        return res.status(404).json({ error: "User not found" });
       }
 
       // Verify club
-      console.log('Verifying club:', club);
+      console.log("Verifying club:", club);
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
-        console.log('Club not found:', club);
-        return res.status(404).json({ error: 'Club not found' });
+        console.log("Club not found:", club);
+        return res.status(404).json({ error: "Club not found" });
       }
 
       // Handle banner upload
       let bannerUrl = null;
       if (req.file) {
-        console.log('Uploading banner:', req.file.originalname);
-        if (!['image/jpeg', 'image/png'].includes(req.file.mimetype)) {
-          console.log('Invalid banner mimetype:', req.file.mimetype);
-          return res.status(400).json({ error: 'Banner must be a JPEG or PNG image' });
+        console.log("Uploading banner:", req.file.originalname);
+        if (!["image/jpeg", "image/png"].includes(req.file.mimetype)) {
+          console.log("Invalid banner mimetype:", req.file.mimetype);
+          return res
+            .status(400)
+            .json({ error: "Banner must be a JPEG or PNG image" });
         }
         if (req.file.size > 5 * 1024 * 1024) {
-          console.log('Banner too large:', req.file.size);
-          return res.status(400).json({ error: 'Banner size must be less than 5MB' });
+          console.log("Banner too large:", req.file.size);
+          return res
+            .status(400)
+            .json({ error: "Banner size must be less than 5MB" });
         }
         bannerUrl = await uploadToCloudinary(req.file.buffer);
-        console.log('Banner uploaded:', bannerUrl);
+        console.log("Banner uploaded:", bannerUrl);
       }
 
       // Create event
-      console.log('Creating event:', { title, club: clubDoc.name });
+      console.log("Creating event:", { title, club: clubDoc.name });
       const event = new Event({
         title,
         description,
@@ -2704,56 +2740,58 @@ app.post(
       });
 
       await event.save();
-      console.log('Event saved:', event._id);
+      console.log("Event saved:", event._id);
 
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
       await clubDoc.save();
-      console.log('Club eventsCount updated:', clubDoc.eventsCount);
+      console.log("Club eventsCount updated:", clubDoc.eventsCount);
 
       // Create notification
       await Notification.create({
         userId: req.user.id,
         message: `Event "${title}" created successfully for ${clubDoc.name}.`,
-        type: 'event',
+        type: "event",
       });
-      console.log('Notification created for user:', req.user.id);
+      console.log("Notification created for user:", req.user.id);
 
       res.status(201).json({
-        message: 'Event created successfully',
+        message: "Event created successfully",
         event: {
           ...event._doc,
           banner: event.banner || null,
         },
       });
     } catch (err) {
-      console.error('Event creation error:', {
+      console.error("Event creation error:", {
         message: err.message,
         stack: err.stack,
         body: req.body,
-        file: req.file ? req.file.originalname : 'No file',
+        file: req.file ? req.file.originalname : "No file",
       });
       if (err.code === 11000) {
         return res.status(400).json({
-          error: 'Event with this title already exists for this club',
+          error: "Event with this title already exists for this club",
         });
       }
-      if (err.name === 'ValidationError') {
-        return res.status(400).json({ error: `Validation error: ${err.message}` });
+      if (err.name === "ValidationError") {
+        return res
+          .status(400)
+          .json({ error: `Validation error: ${err.message}` });
       }
-      if (err.name === 'CastError') {
-        return res.status(400).json({ error: 'Invalid data format' });
+      if (err.name === "CastError") {
+        return res.status(400).json({ error: "Invalid data format" });
       }
-      res.status(500).json({ error: err.message || 'Failed to create event' });
+      res.status(500).json({ error: err.message || "Failed to create event" });
     }
   }
 );
 
 // PUT /api/events/:id (unchanged from provided code)
 app.put(
-  '/api/events/:id',
+  "/api/events/:id",
   authenticateToken,
   isSuperAdmin,
-  upload.single('banner'),
+  upload.single("banner"),
   async (req, res) => {
     const { id } = req.params;
     const {
@@ -2781,52 +2819,62 @@ app.put(
       !registrationTime
     ) {
       return res.status(400).json({
-        error: 'All fields including registration end date and time are required',
+        error:
+          "All fields including registration end date and time are required",
       });
     }
 
     // Validate category
-    if (!['Seminar', 'Competition'].includes(category)) {
-      return res.status(400).json({ error: 'Invalid event category' });
+    if (!["Seminar", "Competition"].includes(category)) {
+      return res.status(400).json({ error: "Invalid event category" });
     }
 
     // Validate dates
     const parsedDate = new Date(`${date}T${time}:00`);
-    const parsedRegistrationEnds = new Date(`${registrationDate}T${registrationTime}:00`);
-    if (isNaN(parsedDate.getTime()) || isNaN(parsedRegistrationEnds.getTime())) {
+    const parsedRegistrationEnds = new Date(
+      `${registrationDate}T${registrationTime}:00`
+    );
+    if (
+      isNaN(parsedDate.getTime()) ||
+      isNaN(parsedRegistrationEnds.getTime())
+    ) {
       return res.status(400).json({
-        error: 'Invalid date or time format for event or registration end',
+        error: "Invalid date or time format for event or registration end",
       });
     }
 
     // Ensure registration end date is not after event date
     if (parsedRegistrationEnds > parsedDate) {
       return res.status(400).json({
-        error: 'Registration end date cannot be after event date',
+        error: "Registration end date cannot be after event date",
       });
     }
 
     try {
       const event = await Event.findById(id);
       if (!event) {
-        return res.status(404).json({ error: 'Event not found' });
+        return res.status(404).json({ error: "Event not found" });
       }
 
       const clubDoc = await Club.findById(club);
       if (!clubDoc) {
-        return res.status(404).json({ error: 'Club not found' });
+        return res.status(404).json({ error: "Club not found" });
       }
 
       let bannerUrl = event.banner;
       if (req.file) {
-        if (!['image/jpeg', 'image/png'].includes(req.file.mimetype)) {
-          return res.status(400).json({ error: 'Banner must be a JPEG or PNG image' });
+        if (!["image/jpeg", "image/png"].includes(req.file.mimetype)) {
+          return res
+            .status(400)
+            .json({ error: "Banner must be a JPEG or PNG image" });
         }
         if (req.file.size > 5 * 1024 * 1024) {
-          return res.status(400).json({ error: 'Banner size must be less than 5MB' });
+          return res
+            .status(400)
+            .json({ error: "Banner size must be less than 5MB" });
         }
         if (event.banner) {
-          const publicId = event.banner.split('/').pop().split('.')[0];
+          const publicId = event.banner.split("/").pop().split(".")[0];
           await cloudinary.uploader.destroy(`ACEM/${publicId}`);
         }
         bannerUrl = await uploadToCloudinary(req.file.buffer);
@@ -2848,21 +2896,23 @@ app.put(
         banner: event.banner || null,
       };
       res.json({
-        message: 'Event updated successfully',
+        message: "Event updated successfully",
         event: transformedEvent,
       });
     } catch (err) {
-      console.error('Event update error:', {
+      console.error("Event update error:", {
         message: err.message,
         stack: err.stack,
       });
-      if (err.name === 'ValidationError') {
-        return res.status(400).json({ error: `Validation error: ${err.message}` });
+      if (err.name === "ValidationError") {
+        return res
+          .status(400)
+          .json({ error: `Validation error: ${err.message}` });
       }
-      if (err.name === 'CastError') {
-        return res.status(400).json({ error: 'Invalid data format' });
+      if (err.name === "CastError") {
+        return res.status(400).json({ error: "Invalid data format" });
       }
-      res.status(500).json({ error: err.message || 'Failed to update event' });
+      res.status(500).json({ error: err.message || "Failed to update event" });
     }
   }
 );
@@ -3487,46 +3537,162 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
 });
 
 //Contact form
-app.post("api/clubs/:id/contact", authenticateToken, async (req, res) => {
-  const { clubId } = req.params;
+app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
+  const { id: clubId } = req.params;
   const { message, coordinatorEmail } = req.body;
-
   try {
+    // Validate club ID
+    if (!mongoose.isValidObjectId(clubId)) {
+      console.error("Invalid club ID:", clubId);
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
     // Validate input
     if (!message || !message.trim()) {
+      console.error("Message is required:", { message });
       return res.status(400).json({ error: "Message is required" });
     }
     if (!coordinatorEmail) {
+      console.error("Coordinator email is required:", { coordinatorEmail });
       return res.status(400).json({ error: "Coordinator email is required" });
     }
-
-    // Find the club
-    const club = await Club.findById(clubId).populate("headCoordinators");
+    // Find the club with populated creator, superAdmins, and headCoordinators
+    const club = await Club.findById(clubId)
+      .populate("creator", "_id name email")
+      .populate("superAdmins", "_id name email")
+      .populate("headCoordinators", "_id name email phone");
     if (!club) {
+      console.error("Club not found:", clubId);
       return res.status(404).json({ error: "Club not found" });
     }
-
     // Verify coordinator
-    const coordinator = club.headCoordinators.find(
+    const allCoordinators = [
+      ...(club.superAdmins || []),
+      ...(club.headCoordinators || []),
+      club.creator,
+    ].filter(Boolean);
+    const coordinator = allCoordinators.find(
       (coord) => coord.email === coordinatorEmail
     );
     if (!coordinator) {
+      console.error("Coordinator not found:", coordinatorEmail);
       return res.status(404).json({ error: "Coordinator not found" });
     }
-
-    // Simulate sending email (replace with Nodemailer or other email service)
-    console.log(`Sending message to ${coordinator.email}:`, {
-      from: req.user.email,
+    // Save the message to the database
+    const contactMessage = new ContactMessage({
+      name: req.user.name,
+      email: req.user.email,
       message,
+      club: club.name,
+      coordinatorEmail,
+      status: "new",
+      priority: "medium",
+      isStarred: false,
+      createdAt: new Date(),
     });
-
-    // Optionally save the message to a database
-    // Example: await Message.create({ clubId, from: req.user._id, to: coordinator._id, message });
-
+    await contactMessage.save();
+    // Send email to coordinator
+    try {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: coordinator.email,
+        subject: `New Contact Message for ${club.name}`,
+        text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
+      });
+      console.log("Email sent to coordinator:", coordinator.email);
+    } catch (emailErr) {
+      console.error("Error sending email:", {
+        message: emailErr.message,
+        stack: emailErr.stack,
+      });
+      // Continue even if email fails, as message is saved
+    }
+    // Create notification for coordinator
+    await Notification.create({
+      userId: coordinator._id,
+      message: `New contact message from ${req.user.name} for ${club.name}`,
+      type: "contact",
+    });
     res.json({ message: "Message sent successfully" });
   } catch (error) {
-    console.error("Error sending message:", error);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error sending contact message:", {
+      message: error.message,
+      stack: error.stack,
+      clubId,
+      userId: req.user?.id,
+    });
+    res.status(500).json({ error: "Server error in sending contact message" });
+  }
+});
+
+// New GET /api/clubs/:id/contact-info
+app.get("/api/clubs/:id/contact-info", authenticateToken, async (req, res) => {
+  const { id: clubId } = req.params;
+  try {
+    // Validate club ID
+    if (!mongoose.isValidObjectId(clubId)) {
+      console.error("Invalid club ID:", clubId);
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+    // Find the club with populated creator, superAdmins, and headCoordinators
+    const club = await Club.findById(clubId)
+      .populate("creator", "_id name email")
+      .populate("superAdmins", "_id name email")
+      .populate("headCoordinators", "_id name email phone")
+      .lean();
+    if (!club) {
+      console.error("Club not found:", clubId);
+      return res.status(404).json({ error: "Club not found" });
+    }
+    // Prepare contact information
+    const contactInfo = {
+      creator: club.creator
+        ? {
+            _id: club.creator._id,
+            name: club.creator.name || "Unknown",
+            email: club.creator.email || "N/A",
+            role: "creator",
+          }
+        : null,
+      superAdmins: club.superAdmins
+        ? club.superAdmins.map((admin) => ({
+            _id: admin._id,
+            name: admin.name || "Unknown",
+            email: admin.email || "N/A",
+            role: "superAdmin",
+          }))
+        : [],
+      headCoordinators: club.headCoordinators
+        ? club.headCoordinators.map((coord) => ({
+            _id: coord._id,
+            name: coord.name || "Unknown",
+            email: coord.email || "N/A",
+            phone: coord.phone || "",
+            role: "headCoordinator",
+          }))
+        : [],
+      clubDetails: {
+        phone: club.phone || "8851020767",
+        room: club.room || "CSE Dept.",
+        timing: club.timing || "9 to 4",
+      },
+    };
+    console.log("Fetched contact info for club:", {
+      clubId,
+      name: club.name,
+      creator: contactInfo.creator,
+      superAdmins: contactInfo.superAdmins.map((a) => a.email),
+      headCoordinators: contactInfo.headCoordinators.map((c) => c.email),
+    });
+    res.json(contactInfo);
+  } catch (error) {
+    console.error("Error fetching club contact info:", {
+      message: error.message,
+      stack: error.stack,
+      clubId,
+    });
+    res
+      .status(500)
+      .json({ error: "Server error in fetching contact information" });
   }
 });
 
@@ -3676,79 +3842,6 @@ app.post(
     }
   }
 );
-
-app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
-  const { id: clubId } = req.params; // Use 'id' to match route parameter
-  const { message, coordinatorEmail } = req.body;
-  try {
-    // Validate club ID
-    if (!mongoose.isValidObjectId(clubId)) {
-      console.error("Invalid club ID:", clubId);
-      return res.status(400).json({ error: "Invalid club ID" });
-    }
-    // Validate input
-    if (!message || !message.trim()) {
-      console.error("Message is required:", { message });
-      return res.status(400).json({ error: "Message is required" });
-    }
-    if (!coordinatorEmail) {
-      console.error("Coordinator email is required:", { coordinatorEmail });
-      return res.status(400).json({ error: "Coordinator email is required" });
-    }
-    // Find the club
-    const club = await Club.findById(clubId).populate("headCoordinators");
-    if (!club) {
-      console.error("Club not found:", clubId);
-      return res.status(404).json({ error: "Club not found" });
-    }
-    // Verify coordinator
-    const coordinator = club.headCoordinators.find(
-      (coord) => coord.email === coordinatorEmail
-    );
-    if (!coordinator) {
-      console.error("Coordinator not found:", coordinatorEmail);
-      return res.status(404).json({ error: "Coordinator not found" });
-    }
-    // Save the message to the database
-    const contactMessage = new ContactMessage({
-      name: req.user.name,
-      email: req.user.email,
-      message,
-      club: club.name,
-      coordinatorEmail,
-      status: "new",
-      priority: "medium",
-      isStarred: false,
-      createdAt: new Date(),
-    });
-    await contactMessage.save();
-    // Send email to coordinator
-    try {
-      await transporter.sendMail({
-        from: `"ACEM" <${process.env.EMAIL_USER}>`,
-        to: coordinator.email,
-        subject: `New Contact Message for ${club.name}`,
-        text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
-      });
-      console.log("Email sent to coordinator:", coordinator.email);
-    } catch (emailErr) {
-      console.error("Error sending email:", {
-        message: emailErr.message,
-        stack: emailErr.stack,
-      });
-      // Continue even if email fails, as message is saved
-    }
-    res.json({ message: "Message sent successfully" });
-  } catch (error) {
-    console.error("Error sending contact message:", {
-      message: error.message,
-      stack: error.stack,
-      clubId,
-      userId: req.user?.id,
-    });
-    res.status(500).json({ error: "Server error in sending contact message" });
-  }
-});
 
 // Update Contact Message Status
 app.patch(
@@ -5522,8 +5615,7 @@ app.get("/api/landing/clubs", async (req, res) => {
       name: club.name || "Unnamed Club",
       category: club.category || "General",
       icon: club.icon || "https://via.placeholder.com/150?text=Club+Icon",
-      banner:
-        club.banner || "https://via.placeholder.com/150?text=Club+Banner",
+      banner: club.banner || "https://via.placeholder.com/150?text=Club+Banner",
       description: club.description || "No description available.",
       memberCount: club.members?.length || 0,
       activeEvents: activeEvents
@@ -5571,12 +5663,18 @@ app.get("/api/events/past", async (req, res) => {
       date: event.date,
       images: event.images?.length
         ? event.images.map((img, idx) => ({
-            path: img || `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/image${idx + 1}.jpg`,
+            path:
+              img ||
+              `/assets/${event.name.toLowerCase().replace(/\s+/g, "-")}/image${
+                idx + 1
+              }.jpg`,
             description: `Photo from ${event.name} - ${idx + 1}`,
           }))
         : [
             {
-              path: `/assets/${event.name.toLowerCase().replace(/\s+/g, '-')}/default.jpg`,
+              path: `/assets/${event.name
+                .toLowerCase()
+                .replace(/\s+/g, "-")}/default.jpg`,
               description: `Default photo for ${event.name}`,
             },
           ],
