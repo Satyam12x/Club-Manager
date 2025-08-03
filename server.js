@@ -3281,6 +3281,120 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   }
 });
 
+//Leave the club
+app.post('/api/clubs/:id/leave', authenticateToken, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const { id } = req.params;
+
+    // Validate club ID
+    if (!mongoose.isValidObjectId(id)) {
+      console.error('POST /api/clubs/:id/leave: Invalid club ID:', id);
+      return res.status(400).json({ error: 'Invalid club ID' });
+    }
+
+    // Fetch club
+    const club = await Club.findById(id).session(session);
+    if (!club) {
+      console.error('POST /api/clubs/:id/leave: Club not found:', id);
+      return res.status(404).json({ error: 'Club not found' });
+    }
+
+    // Fetch user
+    const user = await User.findById(req.user.id).session(session);
+    if (!user) {
+      console.error('POST /api/clubs/:id/leave: User not found:', req.user.id);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if user is a member
+    if (!user.clubs.some(clubId => clubId.equals(club._id))) {
+      console.error('POST /api/clubs/:id/leave: User not a member of club:', {
+        userId: user._id,
+        clubId: club._id,
+      });
+      return res.status(400).json({ error: 'You are not a member of this club' });
+    }
+
+    // Prevent super admins and head coordinators from leaving
+    const isSuperAdmin = club.superAdmins.some(admin => admin.equals(user._id));
+    const isHeadCoordinator = user.isHeadCoordinator && user.headCoordinatorClubs.includes(club.name);
+    if (isSuperAdmin || isHeadCoordinator) {
+      console.error('POST /api/clubs/:id/leave: Unauthorized attempt to leave by privileged user:', {
+        userId: user._id,
+        isSuperAdmin,
+        isHeadCoordinator,
+      });
+      return res.status(403).json({ error: 'Super admins and head coordinators cannot leave the club' });
+    }
+
+    // Remove user from club's members
+    club.members = club.members.filter(memberId => !memberId.equals(user._id));
+    club.memberCount = club.members.length;
+
+    // Remove club from user's clubs and clubName arrays
+    user.clubs = user.clubs.filter(clubId => !clubId.equals(club._id));
+    user.clubName = user.clubName.filter(name => name !== club.name);
+    user.isClubMember = user.clubName.length > 0;
+
+    // Save changes
+    await Promise.all([club.save({ session }), user.save({ session })]);
+
+    // Create notification for the user
+    await Notification.create(
+      [
+        {
+          userId: user._id,
+          message: `You have successfully left ${club.name}.`,
+          type: 'membership',
+        },
+      ],
+      { session }
+    );
+
+    // Notify super admins and head coordinators via email
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(',').map(email => email.trim())
+      : [];
+    const recipients = [...(club.headCoordinators || []), ...superAdminEmails];
+    if (recipients.length > 0) {
+      try {
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: recipients,
+          subject: `Member Left: ${club.name}`,
+          text: `User ${user.name} (${user.email}) has left ${club.name}.`,
+        });
+        console.log('POST /api/clubs/:id/leave: Notification email sent to:', recipients);
+      } catch (emailErr) {
+        console.error('POST /api/clubs/:id/leave: Error sending notification email:', {
+          message: emailErr.message,
+          stack: emailErr.stack,
+        });
+      }
+    }
+
+    await session.commitTransaction();
+    console.log('POST /api/clubs/:id/leave: User successfully left club:', {
+      userId: user._id,
+      clubId: club._id,
+    });
+    res.status(200).json({ message: 'You have successfully left the club' });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error('POST /api/clubs/:id/leave: Error leaving club:', {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+      clubId: req.params.id,
+    });
+    res.status(500).json({ error: 'Server error in leaving club' });
+  } finally {
+    session.endSession();
+  }
+});
+
 // Get Notifications
 app.get("/api/notifications", authenticateToken, async (req, res) => {
   try {
