@@ -196,6 +196,7 @@ const clubSchema = new mongoose.Schema({
     required: true,
   },
   contactEmail: { type: String },
+  whatsappLink: { type: String }, // New field for WhatsApp link
   headCoordinators: { type: [String], default: [] },
   superAdmins: {
     type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
@@ -1727,167 +1728,47 @@ app.post(
 );
 
 // Update Club (Creator, Super Admin, or Head Coordinator only)
-app.patch(
-  "/api/clubs/:id",
-  authenticateToken,
-  isSuperAdmin,
-  upload.fields([
-    { name: "icon", maxCount: 1 },
-    { name: "banner", maxCount: 1 },
-  ]),
-  async (req, res) => {
+app.patch("/api/clubs/:id", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
     const { id } = req.params;
-    const {
-      description,
-      category,
-      contactEmail,
-      headCoordinators,
-      superAdmins,
-    } = req.body;
+    const { name, description, category, contactEmail, whatsappLink, headCoordinators, icon, banner } = req.body;
 
-    if (req.body.name) {
-      return res.status(400).json({ error: "Club name cannot be updated" });
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid club ID" });
     }
 
-    try {
-      const club = await Club.findById(id);
-      if (!club) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-
-      if (description && description.length > 500) {
-        return res
-          .status(400)
-          .json({ error: "Description must be 500 characters or less" });
-      }
-      if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
-        return res.status(400).json({ error: "Invalid contact email" });
-      }
-
-      let iconUrl = club.icon;
-      let bannerUrl = club.banner;
-
-      if (req.files.icon) {
-        if (club.icon) {
-          const publicId = club.icon.split("/").pop().split(".")[0];
-          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
-        }
-        iconUrl = await uploadToCloudinary(req.files.icon[0].buffer);
-      }
-      if (req.files.banner) {
-        if (club.banner) {
-          const publicId = club.banner.split("/").pop().split(".")[0];
-          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
-        }
-        bannerUrl = await uploadToCloudinary(req.files.banner[0].buffer);
-      }
-
-      let validHeadCoordinators = club.headCoordinators;
-      if (headCoordinators !== undefined) {
-        const emails = headCoordinators
-          ? headCoordinators
-              .split(",")
-              .map((email) => email.trim())
-              .filter((email) => email)
-          : [];
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        validHeadCoordinators = emails.filter((email) =>
-          emailRegex.test(email)
-        );
-        await User.updateMany(
-          { email: { $in: validHeadCoordinators } },
-          {
-            $set: { isHeadCoordinator: true },
-            $addToSet: { headCoordinatorClubs: club.name },
-          }
-        );
-        await User.updateMany(
-          {
-            email: { $nin: validHeadCoordinators, $in: club.headCoordinators },
-            headCoordinatorClubs: club.name,
-          },
-          {
-            $pull: { headCoordinatorClubs: club.name },
-          }
-        );
-        await User.updateMany(
-          {
-            email: { $in: club.headCoordinators },
-          },
-          [
-            {
-              $set: {
-                isHeadCoordinator: {
-                  $cond: {
-                    if: { $eq: ["$headCoordinatorClubs", []] },
-                    then: false,
-                    else: true,
-                  },
-                },
-              },
-            },
-          ]
-        );
-      }
-
-      let validSuperAdmins = club.superAdmins;
-      if (superAdmins !== undefined) {
-        const adminIds = superAdmins
-          ? superAdmins
-              .split(",")
-              .map((id) => id.trim())
-              .filter((id) => id)
-          : [];
-        if (adminIds.length > 2) {
-          return res
-            .status(400)
-            .json({ error: "A club can have at most 2 super admins" });
-        }
-        const users = await User.find({ _id: { $in: adminIds } });
-        validSuperAdmins = users.map((user) => user._id);
-        if (validSuperAdmins.length !== adminIds.length) {
-          return res
-            .status(400)
-            .json({ error: "One or more super admin IDs are invalid" });
-        }
-      }
-
-      club.icon = iconUrl;
-      club.banner = bannerUrl;
-      if (description) club.description = description;
-      if (category) {
-        if (
-          !["Technical", "Cultural", "Literary", "Entrepreneurial"].includes(
-            category
-          )
-        ) {
-          return res.status(400).json({ error: "Invalid category" });
-        }
-        club.category = category;
-      }
-      if (contactEmail !== undefined) club.contactEmail = contactEmail;
-      club.headCoordinators = validHeadCoordinators;
-      club.superAdmins = validSuperAdmins;
-
-      club.memberCount = await User.countDocuments({ clubName: club.name });
-      club.eventsCount = await Event.countDocuments({ club: club._id });
-
-      await club.save();
-
-      const transformedClub = {
-        ...club._doc,
-        icon: club.icon || null,
-        banner: club.banner || null,
-      };
-      res
-        .status(200)
-        .json({ message: "Club updated successfully", club: transformedClub });
-    } catch (err) {
-      console.error("Club update error:", err);
-      res.status(500).json({ error: "Server error" });
+    const club = await Club.findById(id).session(session);
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
     }
+
+    // Update fields if provided
+    if (name) club.name = name;
+    if (description) club.description = description;
+    if (category) club.category = category;
+    if (contactEmail) club.contactEmail = contactEmail;
+    if (whatsappLink) club.whatsappLink = whatsappLink; // Update WhatsApp link
+    if (headCoordinators) club.headCoordinators = headCoordinators;
+    if (icon) club.icon = icon;
+    if (banner) club.banner = banner;
+
+    await club.save({ session });
+    await session.commitTransaction();
+    res.status(200).json({ message: "Club updated successfully", club });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("Update club error:", {
+      message: err.message,
+      stack: err.stack,
+      clubId: req.params.id,
+    });
+    res.status(500).json({ error: "Server error in updating club" });
+  } finally {
+    session.endSession();
   }
-);
+});
 // Delete Club (Creator, Super Admin, or Head Coordinator only)
 app.delete(
   "/api/clubs/:id",
@@ -5310,6 +5191,43 @@ app.post("/api/landing/contact", async (req, res) => {
       requestBody: req.body,
     });
     res.status(500).json({ error: "Server error in saving contact message" });
+  }
+});
+
+app.get("/api/landing/clubs", async (req, res) => {
+  try {
+    const totalClubs = await Club.countDocuments();
+    const clubs = await Club.find({}, "name category").lean();
+    const today = new Date();
+    const activeEvents = await Event.find({
+      club: { $in: clubs.map((club) => club._id) },
+      status: "active",
+      date: { $gte: today },
+    })
+      .select("title club date")
+      .lean();
+    const clubsWithEvents = clubs.map((club) => ({
+      name: club.name,
+      category: club.category,
+      activeEvents: activeEvents
+        .filter((event) => event.club.toString() === club._id.toString())
+        .map((event) => ({
+          title: event.title,
+          date: event.date,
+        })),
+    }));
+    res.json({
+      totalClubs,
+      clubs: clubsWithEvents,
+    });
+  } catch (err) {
+    console.error("Error fetching clubs and active events:", {
+      message: err.message,
+      stack: err.stack,
+      path: req.path,
+      method: req.method,
+    });
+    res.status(500).json({ error: "Server error in fetching clubs and events" });
   }
 });
 
