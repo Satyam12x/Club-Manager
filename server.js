@@ -223,7 +223,7 @@ const Club = mongoose.model("Club", clubSchema);
 const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
-  date: { type: Date, required: true }, // Changed to Date type for consistency
+  date: { type: Date, required: true },
   time: { type: String, required: true },
   location: { type: String, required: true },
   club: { type: mongoose.Schema.Types.ObjectId, ref: "Club", required: true },
@@ -255,8 +255,20 @@ const eventSchema = new mongoose.Schema({
   hasRegistrationFee: { type: Boolean, default: false },
   acemFee: { type: Number, default: 0 },
   nonAcemFee: { type: Number, default: 0 },
+  registrationEnds: { type: Date, required: true }, // New field
   createdAt: { type: Date, default: Date.now },
 });
+
+// Validation to ensure registrationEnds is not after date
+eventSchema.pre('save', function (next) {
+  if (this.registrationEnds && this.date && this.registrationEnds > this.date) {
+    const error = new Error('Registration end date cannot be after event date');
+    return next(error);
+  }
+  next();
+});
+
+// Index for efficient querying
 eventSchema.index({ club: 1, date: 1 });
 
 const Event = mongoose.model("Event", eventSchema);
@@ -2264,16 +2276,20 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
     const club = await Club.findById(req.params.id)
       .populate("superAdmins", "name email")
       .populate("members", "name email")
-      .populate("creator", "name email");
+      .populate("creator", "name email")
+      .populate("headCoordinators", "name email phone"); // Added population for headCoordinators
     if (!club) {
       return res.status(404).json({ error: "Club not found" });
     }
+
     const transformedClub = {
       ...club._doc,
       icon: club.icon || null,
       banner: club.banner || null,
+      whatsappLink: club.whatsappLink || null, // Include whatsappLink in response
       memberCount: club.members.length,
     };
+
     res.json(transformedClub);
   } catch (err) {
     console.error("Error fetching club:", {
@@ -2473,8 +2489,10 @@ app.post(
         hasRegistrationFee,
         acemFee,
         nonAcemFee,
+        registrationEnds, // New field
       } = req.body;
 
+      // Validate required fields
       if (
         !title ||
         !description ||
@@ -2483,30 +2501,42 @@ app.post(
         !location ||
         !club ||
         !category ||
-        !eventType
+        !eventType ||
+        !registrationEnds
       ) {
         return res
           .status(400)
-          .json({ error: "All required fields must be provided" });
+          .json({ error: "All required fields, including registration end date, must be provided" });
       }
 
+      // Validate club ID
       if (!mongoose.isValidObjectId(club)) {
         return res.status(400).json({ error: "Invalid club ID" });
       }
 
+      // Validate category
       if (!["Seminar", "Competition"].includes(category)) {
         return res.status(400).json({ error: "Invalid event category" });
       }
 
+      // Validate event type
       if (!["Intra-College", "Inter-College"].includes(eventType)) {
         return res.status(400).json({ error: "Invalid event type" });
       }
 
+      // Validate dates
       const parsedDate = new Date(date);
-      if (isNaN(parsedDate.getTime())) {
-        return res.status(400).json({ error: "Invalid date format" });
+      const parsedRegistrationEnds = new Date(registrationEnds);
+      if (isNaN(parsedDate.getTime()) || isNaN(parsedRegistrationEnds.getTime())) {
+        return res.status(400).json({ error: "Invalid date format for event or registration end date" });
       }
 
+      // Ensure registration end date is not after event date
+      if (parsedRegistrationEnds > parsedDate) {
+        return res.status(400).json({ error: "Registration end date cannot be after event date" });
+      }
+
+      // Validate registration fees for Inter-College events
       const isFeeRequired =
         eventType === "Inter-College" && hasRegistrationFee === "true";
       if (isFeeRequired) {
@@ -2525,12 +2555,15 @@ app.post(
         }
       }
 
+      // Verify user
       const user = await User.findById(req.user.id);
       if (!user) return res.status(404).json({ error: "User not found" });
 
+      // Verify club
       const clubDoc = await Club.findById(club);
       if (!clubDoc) return res.status(404).json({ error: "Club not found" });
 
+      // Check authorization
       const isAuthorized =
         user.isAdmin ||
         clubDoc.creator.equals(req.user.id) ||
@@ -2543,6 +2576,7 @@ app.post(
         });
       }
 
+      // Handle banner upload
       let bannerUrl = null;
       if (req.file) {
         if (!["image/jpeg", "image/png"].includes(req.file.mimetype)) {
@@ -2558,6 +2592,7 @@ app.post(
         bannerUrl = await uploadToCloudinary(req.file.buffer);
       }
 
+      // Create event
       const event = new Event({
         title,
         description,
@@ -2572,6 +2607,7 @@ app.post(
         hasRegistrationFee: isFeeRequired,
         acemFee: isFeeRequired ? parseFloat(acemFee) : 0,
         nonAcemFee: isFeeRequired ? parseFloat(nonAcemFee) : 0,
+        registrationEnds: parsedRegistrationEnds, // Save registration end date
         registeredUsers: [],
       });
 
@@ -2579,6 +2615,7 @@ app.post(
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
       await clubDoc.save();
 
+      // Create notification
       await Notification.create({
         userId: req.user.id,
         message: `Event "${title}" created successfully for ${clubDoc.name}.`,
@@ -2674,9 +2711,9 @@ app.put(
   upload.single("banner"),
   async (req, res) => {
     const { id } = req.params;
-    const { title, description, date, time, location, club, category } =
-      req.body;
+    const { title, description, date, time, location, club, category, registrationEnds } = req.body;
 
+    // Validate required fields
     if (
       !title ||
       !description ||
@@ -2684,14 +2721,29 @@ app.put(
       !time ||
       !location ||
       !club ||
-      !category
+      !category ||
+      !registrationEnds
     ) {
       return res
         .status(400)
-        .json({ error: "All fields including category are required" });
+        .json({ error: "All fields including category and registration end date are required" });
     }
+
+    // Validate category
     if (!["Seminar", "Competition"].includes(category)) {
       return res.status(400).json({ error: "Invalid event category" });
+    }
+
+    // Validate dates
+    const parsedDate = new Date(date);
+    const parsedRegistrationEnds = new Date(registrationEnds);
+    if (isNaN(parsedDate.getTime()) || isNaN(parsedRegistrationEnds.getTime())) {
+      return res.status(400).json({ error: "Invalid date format for event or registration end date" });
+    }
+
+    // Ensure registration end date is not after event date
+    if (parsedRegistrationEnds > parsedDate) {
+      return res.status(400).json({ error: "Registration end date cannot be after event date" });
     }
 
     try {
@@ -2707,6 +2759,16 @@ app.put(
 
       let bannerUrl = event.banner;
       if (req.file) {
+        if (!["image/jpeg", "image/png"].includes(req.file.mimetype)) {
+          return res
+            .status(400)
+            .json({ error: "Banner must be a JPEG or PNG image" });
+        }
+        if (req.file.size > 5 * 1024 * 1024) {
+          return res
+            .status(400)
+            .json({ error: "Banner size must be less than 5MB" });
+        }
         if (event.banner) {
           const publicId = event.banner.split("/").pop().split(".")[0];
           await cloudinary.uploader.destroy(`ACEM/${publicId}`);
@@ -2716,12 +2778,13 @@ app.put(
 
       event.title = title;
       event.description = description;
-      event.date = date;
+      event.date = parsedDate;
       event.time = time;
       event.location = location;
       event.club = club;
       event.banner = bannerUrl;
       event.category = category;
+      event.registrationEnds = parsedRegistrationEnds; // Update registration end date
       await event.save();
 
       const transformedEvent = {
@@ -2733,11 +2796,23 @@ app.put(
         event: transformedEvent,
       });
     } catch (err) {
-      console.error("Event update error:", err);
-      res.status(500).json({ error: "Server error" });
+      console.error("Event update error:", {
+        message: err.message,
+        stack: err.stack,
+      });
+      if (err.name === "ValidationError") {
+        return res
+          .status(400)
+          .json({ error: `Validation error: ${err.message}` });
+      }
+      if (err.name === "CastError") {
+        return res.status(400).json({ error: "Invalid data format" });
+      }
+      res.status(500).json({ error: err.message || "Failed to update event" });
     }
   }
 );
+
 // Delete Event (Creator, Super Admin, or Head Coordinator only)
 app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   const session = await mongoose.startSession();
@@ -2794,6 +2869,12 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
     if (!event) {
       console.error("Event not found:", req.params.id);
       return res.status(404).json({ error: "Event not found" });
+    }
+
+    // Check if registration period is open
+    if (event.registrationEnds && new Date() > new Date(event.registrationEnds)) {
+      console.error("Registration period has ended for event:", req.params.id);
+      return res.status(400).json({ error: "Registration period has ended" });
     }
 
     if (!event.club || !mongoose.isValidObjectId(event.club._id)) {
@@ -2941,6 +3022,7 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
               <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
               <p>Event Time: ${event.time}</p>
               <p>Location: ${event.location}</p>
+              <p>Registration Ends: ${new Date(event.registrationEnds).toLocaleDateString()}</p>
               ${
                 event.hasRegistrationFee
                   ? `<p>Payment Amount: ${
