@@ -5161,6 +5161,27 @@ app.get(
   }
 );
 
+app.get('/api/practice-attendance/:id/present', async (req, res) => {
+  try {
+    const record = await PracticeAttendance.findById(req.params.id).populate('attendance.userId', 'name email rollNo');
+    if (!record) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+    const presentStudents = record.attendance
+      .filter(a => a.status === 'present')
+      .map(a => ({
+        _id: a.userId._id,
+        name: a.userId.name,
+        email: a.userId.email,
+        rollNo: a.userId.rollNo || 'N/A',
+      }));
+    res.json({ presentStudents, date: record.date });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Error Handling Middleware
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
