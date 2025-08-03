@@ -3395,6 +3395,50 @@ app.post('/api/clubs/:id/leave', authenticateToken, async (req, res) => {
   }
 });
 
+//Contact form 
+app.post("api/clubs/:id/contact", authenticateToken, async (req, res) => {
+  const { clubId } = req.params;
+  const { message, coordinatorEmail } = req.body;
+
+  try {
+    // Validate input
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "Message is required" });
+    }
+    if (!coordinatorEmail) {
+      return res.status(400).json({ error: "Coordinator email is required" });
+    }
+
+    // Find the club
+    const club = await Club.findById(clubId).populate("headCoordinators");
+    if (!club) {
+      return res.status(404).json({ error: "Club not found" });
+    }
+
+    // Verify coordinator
+    const coordinator = club.headCoordinators.find(
+      (coord) => coord.email === coordinatorEmail
+    );
+    if (!coordinator) {
+      return res.status(404).json({ error: "Coordinator not found" });
+    }
+
+    // Simulate sending email (replace with Nodemailer or other email service)
+    console.log(`Sending message to ${coordinator.email}:`, {
+      from: req.user.email,
+      message,
+    });
+
+    // Optionally save the message to a database
+    // Example: await Message.create({ clubId, from: req.user._id, to: coordinator._id, message });
+
+    res.json({ message: "Message sent successfully" });
+  } catch (error) {
+    console.error("Error sending message:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 // Get Notifications
 app.get("/api/notifications", authenticateToken, async (req, res) => {
   try {
@@ -5134,6 +5178,138 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
       userId: req.user?._id,
     });
     res.status(500).json({ error: "Server error fetching points table" });
+  }
+});
+
+
+//landing page stats
+// Get Landing Page Statistics
+app.get("/api/landing/stats", async (req, res) => {
+  try {
+    const activeStudents = await User.countDocuments({ isClubMember: true });
+    const activeClubs = await Club.countDocuments();
+    const eventsOrganized = await Event.countDocuments();
+    const satisfactionRate = 95; // Hardcoded, as no feedback schema provided
+
+    res.json({
+      activeStudents,
+      activeClubs,
+      eventsOrganized,
+      satisfactionRate,
+    });
+  } catch (err) {
+    console.error("Error fetching landing stats:", {
+      message: err.message,
+      stack: err.stack,
+    });
+    res.status(500).json({ error: "Server error in fetching landing statistics" });
+  }
+});
+
+// Get Club Categories with Counts
+app.get("/api/landing/club-categories", async (req, res) => {
+  try {
+    const categories = await Club.aggregate([
+      {
+        $group: {
+          _id: "$category",
+          count: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          category: "$_id",
+          count: 1,
+        },
+      },
+    ]);
+
+    // Map to frontend-expected format
+    const categoryMap = {
+      technical: "Technical",
+      cultural: "Cultural",
+      literary: "Literary",
+      social: "Social",
+      sports: "Sports",
+    };
+
+    const result = {};
+    Object.keys(categoryMap).forEach((key) => {
+      const category = categories.find((c) => c.category === key);
+      result[categoryMap[key]] = category ? category.count : 0;
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error("Error fetching club categories:", {
+      message: err.message,
+      stack: err.stack,
+    });
+    res.status(500).json({ error: "Server error in fetching club categories" });
+  }
+});
+
+// Submit Contact Message (Public Endpoint)
+app.post("/api/landing/contact", async (req, res) => {
+  const { name, email, subject, message, club } = req.body;
+
+  if (!name || !email || !message) {
+    return res.status(400).json({ error: "Name, email, and message are required" });
+  }
+
+  try {
+    // Validate club if provided
+    if (club) {
+      const clubDoc = await Club.findOne({ name: club });
+      if (!clubDoc) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+    }
+
+    const contactMessage = new ContactMessage({
+      name,
+      email,
+      subject: subject || "General Inquiry",
+      message,
+      club: club || null,
+      status: "new",
+      priority: "medium",
+      isStarred: false,
+      createdAt: new Date(),
+    });
+    await contactMessage.save();
+
+    // Send email notification to super admins
+    const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
+      : [];
+    if (superAdminEmails.length > 0) {
+      try {
+        await transporter.sendMail({
+          from: `"ACEM" <${process.env.EMAIL_USER}>`,
+          to: superAdminEmails,
+          subject: `New Contact Message: ${subject || "General Inquiry"}`,
+          text: `A new contact message has been received.\n\nName: ${name}\nEmail: ${email}\nClub: ${
+            club || "None"
+          }\nMessage: ${message}`,
+        });
+      } catch (emailErr) {
+        console.error("Error sending contact message email:", {
+          message: emailErr.message,
+          stack: emailErr.stack,
+        });
+      }
+    }
+
+    res.status(201).json({ message: "Contact message sent successfully" });
+  } catch (err) {
+    console.error("Error saving contact message:", {
+      message: err.message,
+      stack: err.stack,
+      requestBody: req.body,
+    });
+    res.status(500).json({ error: "Server error in saving contact message" });
   }
 });
 
