@@ -5420,7 +5420,10 @@ app.post("/api/landing/contact", async (req, res) => {
 app.get("/api/landing/clubs", async (req, res) => {
   try {
     const totalClubs = await Club.countDocuments();
-    const clubs = await Club.find({}, "name category").lean();
+    const clubs = await Club.find(
+      {},
+      "name category icon banner description members"
+    ).lean();
     const today = new Date();
     const activeEvents = await Event.find({
       club: { $in: clubs.map((club) => club._id) },
@@ -5429,16 +5432,27 @@ app.get("/api/landing/clubs", async (req, res) => {
     })
       .select("title club date")
       .lean();
+
     const clubsWithEvents = clubs.map((club) => ({
-      name: club.name,
-      category: club.category,
+      _id: club._id,
+      name: club.name || "Unnamed Club",
+      category: club.category || "General",
+      icon: club.icon || "https://via.placeholder.com/150?text=Club+Icon",
+      banner:
+        club.banner || "https://via.placeholder.com/150?text=Club+Banner",
+      description: club.description || "No description available.",
+      memberCount: club.members?.length || 0,
       activeEvents: activeEvents
         .filter((event) => event.club.toString() === club._id.toString())
         .map((event) => ({
           title: event.title,
           date: event.date,
         })),
+      eventsCount: activeEvents.filter(
+        (event) => event.club.toString() === club._id.toString()
+      ).length,
     }));
+
     res.json({
       totalClubs,
       clubs: clubsWithEvents,
