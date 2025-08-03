@@ -5561,13 +5561,13 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
       { $project: { _id: 1, practicePoints: 1 } },
     ]);
 
-    // Fetch all users with relevant fields, including clubName, clubRoles, and avatar
+    // Fetch users who are club members with relevant fields
     const users = await User.find(
-      {},
-      "name email rollNo clubName clubRoles avatar"
+      { isClubMember: true },
+      "name email rollNo clubName profilePicture"
     ).lean();
 
-    // Combine points, user details, and filter by member roles
+    // Combine points and user details
     const pointsTable = users
       .map((user) => {
         // Ensure clubName is an array
@@ -5577,27 +5577,8 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
             ? [user.clubName]
             : [];
 
-        // Construct clubRoles if not provided, defaulting to 'member' for each club
-        const clubRoles =
-          user.clubRoles ||
-          clubNames.map((clubName) => ({
-            clubName,
-            roles: ["member"],
-          }));
-
-        // Filter clubs where the user is only a member (exclude headCoordinator, admin, superAdmin)
-        const memberClubs = clubRoles
-          .filter(
-            (clubRole) =>
-              clubRole.roles.includes("member") &&
-              !clubRole.roles.includes("headCoordinator") &&
-              !clubRole.roles.includes("admin") &&
-              !clubRole.roles.includes("superAdmin")
-          )
-          .map((clubRole) => clubRole.clubName);
-
-        // Skip users with no member clubs
-        if (memberClubs.length === 0) return null;
+        // Skip users with no clubs
+        if (clubNames.length === 0) return null;
 
         const eventUserPoints =
           eventPoints.find((ep) => ep._id.toString() === user._id.toString())
@@ -5611,16 +5592,12 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
           name: user.name || "Unknown",
           email: user.email || "N/A",
           rollNo: user.rollNo || "N/A",
-          clubName: memberClubs,
-          clubRoles: clubRoles.map((role) => ({
-            clubName: role.clubName,
-            roles: Array.isArray(role.roles) ? role.roles : [role.roles],
-          })),
+          clubName: clubNames,
           totalPoints: eventUserPoints + practiceUserPoints,
-          avatar: user.avatar || "https://via.placeholder.com/60/60",
+          profilePicture: user.profilePicture || null,
         };
       })
-      .filter((user) => user !== null); // Remove users with no member clubs
+      .filter((user) => user !== null); // Remove users with no clubs
 
     // Sort by totalPoints in descending order
     pointsTable.sort((a, b) => b.totalPoints - a.totalPoints);
