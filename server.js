@@ -260,9 +260,9 @@ const eventSchema = new mongoose.Schema({
 });
 
 // Validation to ensure registrationEnds is not after date
-eventSchema.pre('save', function (next) {
+eventSchema.pre("save", function (next) {
   if (this.registrationEnds && this.date && this.registrationEnds > this.date) {
-    const error = new Error('Registration end date cannot be after event date');
+    const error = new Error("Registration end date cannot be after event date");
     return next(error);
   }
   next();
@@ -462,20 +462,20 @@ const authenticateToken = (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
-    console.log("authenticateToken: Token verified", {
-      userId: decoded.id,
-      email: decoded.email,
-      method: req.method,
-      url: req.originalUrl,
-    });
+    // console.log("authenticateToken: Token verified", {
+    //   userId: decoded.id,
+    //   email: decoded.email,
+    //   method: req.method,
+    //   url: req.originalUrl,
+    // });
     next();
   } catch (err) {
-    console.error("authenticateToken: Token verification error", {
-      message: err.message,
-      stack: err.stack,
-      method: req.method,
-      url: req.originalUrl,
-    });
+    // console.error("authenticateToken: Token verification error", {
+    //   message: err.message,
+    //   stack: err.stack,
+    //   method: req.method,
+    //   url: req.originalUrl,
+    // });
     return res.status(403).json({ error: "Invalid or expired token" });
   }
 };
@@ -488,10 +488,10 @@ const isAdmin = async (req, res, next) => {
     }
     next();
   } catch (err) {
-    console.error("Admin check error:", {
-      message: err.message,
-      stack: err.stack,
-    });
+    // console.error("Admin check error:", {
+    //   message: err.message,
+    //   stack: err.stack,
+    // });
     res.status(500).json({ error: "Server error in admin check" });
   }
 };
@@ -500,11 +500,11 @@ const isSuperAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
-      console.error("isSuperAdmin: User not found", {
-        userId: req.user.id,
-        method: req.method,
-        url: req.originalUrl,
-      });
+      // console.error("isSuperAdmin: User not found", {
+      //   userId: req.user.id,
+      //   method: req.method,
+      //   url: req.originalUrl,
+      // });
       return res.status(404).json({ error: "User not found" });
     }
 
@@ -513,22 +513,22 @@ const isSuperAdmin = async (req, res, next) => {
       // For routes like PATCH /api/membership-requests/:id
       const membershipRequest = await MembershipRequest.findById(req.params.id);
       if (!membershipRequest) {
-        console.error("isSuperAdmin: Membership request not found", {
-          requestId: req.params.id,
-          userId: req.user.id,
-          method: req.method,
-          url: req.originalUrl,
-        });
+        // console.error("isSuperAdmin: Membership request not found", {
+        //   requestId: req.params.id,
+        //   userId: req.user.id,
+        //   method: req.method,
+        //   url: req.originalUrl,
+        // });
         return res.status(404).json({ error: "Membership request not found" });
       }
       if (!mongoose.isValidObjectId(membershipRequest.clubId)) {
-        console.error("isSuperAdmin: Invalid clubId in membership request", {
-          requestId: req.params.id,
-          clubId: membershipRequest.clubId,
-          userId: req.user.id,
-          method: req.method,
-          url: req.originalUrl,
-        });
+        // console.error("isSuperAdmin: Invalid clubId in membership request", {
+        //   requestId: req.params.id,
+        //   clubId: membershipRequest.clubId,
+        //   userId: req.user.id,
+        //   method: req.method,
+        //   url: req.originalUrl,
+        // });
         return res
           .status(400)
           .json({ error: "Invalid club ID in membership request" });
@@ -537,12 +537,12 @@ const isSuperAdmin = async (req, res, next) => {
     } else if (req.body.clubId) {
       // For routes like POST /api/membership-requests
       if (!mongoose.isValidObjectId(req.body.clubId)) {
-        console.error("isSuperAdmin: Invalid clubId in request body", {
-          clubId: req.body.clubId,
-          userId: req.user.id,
-          method: req.method,
-          url: req.originalUrl,
-        });
+        // console.error("isSuperAdmin: Invalid clubId in request body", {
+        //   clubId: req.body.clubId,
+        //   userId: req.user.id,
+        //   method: req.method,
+        //   url: req.originalUrl,
+        // });
         return res.status(400).json({ error: "Invalid club ID" });
       }
       club = await Club.findById(req.body.clubId);
@@ -1740,47 +1740,61 @@ app.post(
 );
 
 // Update Club (Creator, Super Admin, or Head Coordinator only)
-app.patch("/api/clubs/:id", authenticateToken, isSuperAdminOrAdmin, async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const { id } = req.params;
-    const { name, description, category, contactEmail, whatsappLink, headCoordinators, icon, banner } = req.body;
+app.patch(
+  "/api/clubs/:id",
+  authenticateToken,
+  isSuperAdminOrAdmin,
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      const { id } = req.params;
+      const {
+        name,
+        description,
+        category,
+        contactEmail,
+        whatsappLink,
+        headCoordinators,
+        icon,
+        banner,
+      } = req.body;
 
-    if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ error: "Invalid club ID" });
+      if (!mongoose.isValidObjectId(id)) {
+        return res.status(400).json({ error: "Invalid club ID" });
+      }
+
+      const club = await Club.findById(id).session(session);
+      if (!club) {
+        return res.status(404).json({ error: "Club not found" });
+      }
+
+      // Update fields if provided
+      if (name) club.name = name;
+      if (description) club.description = description;
+      if (category) club.category = category;
+      if (contactEmail) club.contactEmail = contactEmail;
+      if (whatsappLink) club.whatsappLink = whatsappLink; // Update WhatsApp link
+      if (headCoordinators) club.headCoordinators = headCoordinators;
+      if (icon) club.icon = icon;
+      if (banner) club.banner = banner;
+
+      await club.save({ session });
+      await session.commitTransaction();
+      res.status(200).json({ message: "Club updated successfully", club });
+    } catch (err) {
+      await session.abortTransaction();
+      console.error("Update club error:", {
+        message: err.message,
+        stack: err.stack,
+        clubId: req.params.id,
+      });
+      res.status(500).json({ error: "Server error in updating club" });
+    } finally {
+      session.endSession();
     }
-
-    const club = await Club.findById(id).session(session);
-    if (!club) {
-      return res.status(404).json({ error: "Club not found" });
-    }
-
-    // Update fields if provided
-    if (name) club.name = name;
-    if (description) club.description = description;
-    if (category) club.category = category;
-    if (contactEmail) club.contactEmail = contactEmail;
-    if (whatsappLink) club.whatsappLink = whatsappLink; // Update WhatsApp link
-    if (headCoordinators) club.headCoordinators = headCoordinators;
-    if (icon) club.icon = icon;
-    if (banner) club.banner = banner;
-
-    await club.save({ session });
-    await session.commitTransaction();
-    res.status(200).json({ message: "Club updated successfully", club });
-  } catch (err) {
-    await session.abortTransaction();
-    console.error("Update club error:", {
-      message: err.message,
-      stack: err.stack,
-      clubId: req.params.id,
-    });
-    res.status(500).json({ error: "Server error in updating club" });
-  } finally {
-    session.endSession();
   }
-});
+);
 // Delete Club (Creator, Super Admin, or Head Coordinator only)
 app.delete(
   "/api/clubs/:id",
@@ -2272,29 +2286,28 @@ app.get("/api/clubs/:id", authenticateToken, async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ error: "Invalid club ID" });
     }
-
     const club = await Club.findById(req.params.id)
       .populate("superAdmins", "name email")
       .populate("members", "name email")
       .populate("creator", "name email")
-      .populate("headCoordinators", "name email phone"); // Added population for headCoordinators
+      .populate("headCoordinators", "name email phone");
     if (!club) {
       return res.status(404).json({ error: "Club not found" });
     }
-
     const transformedClub = {
       ...club._doc,
       icon: club.icon || null,
       banner: club.banner || null,
-      whatsappLink: club.whatsappLink || null, // Include whatsappLink in response
+      whatsappLink: club.whatsappLink || null,
       memberCount: club.members.length,
+      superAdmins: club.superAdmins || [], // Ensure superAdmins is always an array
     };
-
     res.json(transformedClub);
   } catch (err) {
     console.error("Error fetching club:", {
       message: err.message,
       stack: err.stack,
+      clubId: req.params.id,
     });
     res.status(500).json({ error: "Server error in fetching club" });
   }
@@ -2471,12 +2484,15 @@ app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
 
 // Create Event (Creator, Super Admin, or Head Coordinator only)
 app.post(
-  "/api/events",
+  '/api/events',
   authenticateToken,
+  upload.single('banner'),
   isHeadCoordinatorOrAdmin,
-  upload.single("banner"),
   async (req, res) => {
     try {
+      console.log('POST /api/events - req.body:', req.body); // Debug log
+      console.log('POST /api/events - req.file:', req.file); // Debug log
+
       const {
         title,
         description,
@@ -2489,7 +2505,8 @@ app.post(
         hasRegistrationFee,
         acemFee,
         nonAcemFee,
-        registrationEnds, // New field
+        registrationDate,
+        registrationTime,
       } = req.body;
 
       // Validate required fields
@@ -2502,43 +2519,59 @@ app.post(
         !club ||
         !category ||
         !eventType ||
-        !registrationEnds
+        !registrationDate ||
+        !registrationTime
       ) {
-        return res
-          .status(400)
-          .json({ error: "All required fields, including registration end date, must be provided" });
+        console.log('Missing required fields:', {
+          title, description, date, time, location, club, category, eventType,
+          registrationDate, registrationTime,
+        });
+        return res.status(400).json({
+          error: 'All required fields, including registration end date and time, must be provided',
+        });
       }
 
       // Validate club ID
       if (!mongoose.isValidObjectId(club)) {
-        return res.status(400).json({ error: "Invalid club ID" });
+        console.log('Invalid club ID:', club);
+        return res.status(400).json({ error: 'Invalid club ID' });
       }
 
       // Validate category
-      if (!["Seminar", "Competition"].includes(category)) {
-        return res.status(400).json({ error: "Invalid event category" });
+      if (!['Seminar', 'Competition'].includes(category)) {
+        console.log('Invalid category:', category);
+        return res.status(400).json({ error: 'Invalid event category' });
       }
 
       // Validate event type
-      if (!["Intra-College", "Inter-College"].includes(eventType)) {
-        return res.status(400).json({ error: "Invalid event type" });
+      if (!['Intra-College', 'Inter-College'].includes(eventType)) {
+        console.log('Invalid event type:', eventType);
+        return res.status(400).json({ error: 'Invalid event type' });
       }
 
       // Validate dates
-      const parsedDate = new Date(date);
-      const parsedRegistrationEnds = new Date(registrationEnds);
+      const parsedDate = new Date(`${date}T${time}:00`);
+      const parsedRegistrationEnds = new Date(`${registrationDate}T${registrationTime}:00`);
       if (isNaN(parsedDate.getTime()) || isNaN(parsedRegistrationEnds.getTime())) {
-        return res.status(400).json({ error: "Invalid date format for event or registration end date" });
+        console.log('Invalid date/time:', { date, time, registrationDate, registrationTime });
+        return res.status(400).json({
+          error: 'Invalid date or time format for event or registration end',
+        });
       }
 
       // Ensure registration end date is not after event date
       if (parsedRegistrationEnds > parsedDate) {
-        return res.status(400).json({ error: "Registration end date cannot be after event date" });
+        console.log('Registration date after event date:', {
+          parsedRegistrationEnds,
+          parsedDate,
+        });
+        return res.status(400).json({
+          error: 'Registration end date cannot be after event date',
+        });
       }
 
       // Validate registration fees for Inter-College events
-      const isFeeRequired =
-        eventType === "Inter-College" && hasRegistrationFee === "true";
+      const isFeeRequired = eventType === 'Inter-College' && hasRegistrationFee === 'true';
       if (isFeeRequired) {
         if (
           !acemFee ||
@@ -2548,51 +2581,47 @@ app.post(
           parseFloat(acemFee) < 0 ||
           parseFloat(nonAcemFee) < 0
         ) {
+          console.log('Invalid fees:', { acemFee, nonAcemFee });
           return res.status(400).json({
-            error:
-              "Valid registration fees are required for Inter-College events",
+            error: 'Valid registration fees are required for Inter-College events',
           });
         }
       }
 
       // Verify user
+      console.log('Verifying user:', req.user.id);
       const user = await User.findById(req.user.id);
-      if (!user) return res.status(404).json({ error: "User not found" });
+      if (!user) {
+        console.log('User not found:', req.user.id);
+        return res.status(404).json({ error: 'User not found' });
+      }
 
       // Verify club
+      console.log('Verifying club:', club);
       const clubDoc = await Club.findById(club);
-      if (!clubDoc) return res.status(404).json({ error: "Club not found" });
-
-      // Check authorization
-      const isAuthorized =
-        user.isAdmin ||
-        clubDoc.creator.equals(req.user.id) ||
-        clubDoc.superAdmins.some((admin) => admin.equals(req.user.id)) ||
-        user.headCoordinatorClubs.includes(clubDoc.name);
-
-      if (!isAuthorized) {
-        return res.status(403).json({
-          error: "Not authorized to create events for this club",
-        });
+      if (!clubDoc) {
+        console.log('Club not found:', club);
+        return res.status(404).json({ error: 'Club not found' });
       }
 
       // Handle banner upload
       let bannerUrl = null;
       if (req.file) {
-        if (!["image/jpeg", "image/png"].includes(req.file.mimetype)) {
-          return res
-            .status(400)
-            .json({ error: "Banner must be a JPEG or PNG image" });
+        console.log('Uploading banner:', req.file.originalname);
+        if (!['image/jpeg', 'image/png'].includes(req.file.mimetype)) {
+          console.log('Invalid banner mimetype:', req.file.mimetype);
+          return res.status(400).json({ error: 'Banner must be a JPEG or PNG image' });
         }
         if (req.file.size > 5 * 1024 * 1024) {
-          return res
-            .status(400)
-            .json({ error: "Banner size must be less than 5MB" });
+          console.log('Banner too large:', req.file.size);
+          return res.status(400).json({ error: 'Banner size must be less than 5MB' });
         }
         bannerUrl = await uploadToCloudinary(req.file.buffer);
+        console.log('Banner uploaded:', bannerUrl);
       }
 
       // Create event
+      console.log('Creating event:', { title, club: clubDoc.name });
       const event = new Event({
         title,
         description,
@@ -2607,47 +2636,170 @@ app.post(
         hasRegistrationFee: isFeeRequired,
         acemFee: isFeeRequired ? parseFloat(acemFee) : 0,
         nonAcemFee: isFeeRequired ? parseFloat(nonAcemFee) : 0,
-        registrationEnds: parsedRegistrationEnds, // Save registration end date
+        registrationEnds: parsedRegistrationEnds,
         registeredUsers: [],
       });
 
       await event.save();
+      console.log('Event saved:', event._id);
+
       clubDoc.eventsCount = await Event.countDocuments({ club: clubDoc._id });
       await clubDoc.save();
+      console.log('Club eventsCount updated:', clubDoc.eventsCount);
 
       // Create notification
       await Notification.create({
         userId: req.user.id,
         message: `Event "${title}" created successfully for ${clubDoc.name}.`,
-        type: "event",
+        type: 'event',
       });
+      console.log('Notification created for user:', req.user.id);
 
       res.status(201).json({
-        message: "Event created successfully",
+        message: 'Event created successfully',
         event: {
           ...event._doc,
           banner: event.banner || null,
         },
       });
     } catch (err) {
-      console.error("Event creation error:", {
+      console.error('Event creation error:', {
         message: err.message,
         stack: err.stack,
+        body: req.body,
+        file: req.file ? req.file.originalname : 'No file',
       });
       if (err.code === 11000) {
         return res.status(400).json({
-          error: "Event with this title already exists for this club",
+          error: 'Event with this title already exists for this club',
         });
       }
-      if (err.name === "ValidationError") {
-        return res
-          .status(400)
-          .json({ error: `Validation error: ${err.message}` });
+      if (err.name === 'ValidationError') {
+        return res.status(400).json({ error: `Validation error: ${err.message}` });
       }
-      if (err.name === "CastError") {
-        return res.status(400).json({ error: "Invalid data format" });
+      if (err.name === 'CastError') {
+        return res.status(400).json({ error: 'Invalid data format' });
       }
-      res.status(500).json({ error: err.message || "Failed to create event" });
+      res.status(500).json({ error: err.message || 'Failed to create event' });
+    }
+  }
+);
+
+// PUT /api/events/:id (unchanged from provided code)
+app.put(
+  '/api/events/:id',
+  authenticateToken,
+  isSuperAdmin,
+  upload.single('banner'),
+  async (req, res) => {
+    const { id } = req.params;
+    const {
+      title,
+      description,
+      date,
+      time,
+      location,
+      club,
+      category,
+      registrationDate,
+      registrationTime,
+    } = req.body;
+
+    // Validate required fields
+    if (
+      !title ||
+      !description ||
+      !date ||
+      !time ||
+      !location ||
+      !club ||
+      !category ||
+      !registrationDate ||
+      !registrationTime
+    ) {
+      return res.status(400).json({
+        error: 'All fields including registration end date and time are required',
+      });
+    }
+
+    // Validate category
+    if (!['Seminar', 'Competition'].includes(category)) {
+      return res.status(400).json({ error: 'Invalid event category' });
+    }
+
+    // Validate dates
+    const parsedDate = new Date(`${date}T${time}:00`);
+    const parsedRegistrationEnds = new Date(`${registrationDate}T${registrationTime}:00`);
+    if (isNaN(parsedDate.getTime()) || isNaN(parsedRegistrationEnds.getTime())) {
+      return res.status(400).json({
+        error: 'Invalid date or time format for event or registration end',
+      });
+    }
+
+    // Ensure registration end date is not after event date
+    if (parsedRegistrationEnds > parsedDate) {
+      return res.status(400).json({
+        error: 'Registration end date cannot be after event date',
+      });
+    }
+
+    try {
+      const event = await Event.findById(id);
+      if (!event) {
+        return res.status(404).json({ error: 'Event not found' });
+      }
+
+      const clubDoc = await Club.findById(club);
+      if (!clubDoc) {
+        return res.status(404).json({ error: 'Club not found' });
+      }
+
+      let bannerUrl = event.banner;
+      if (req.file) {
+        if (!['image/jpeg', 'image/png'].includes(req.file.mimetype)) {
+          return res.status(400).json({ error: 'Banner must be a JPEG or PNG image' });
+        }
+        if (req.file.size > 5 * 1024 * 1024) {
+          return res.status(400).json({ error: 'Banner size must be less than 5MB' });
+        }
+        if (event.banner) {
+          const publicId = event.banner.split('/').pop().split('.')[0];
+          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
+        }
+        bannerUrl = await uploadToCloudinary(req.file.buffer);
+      }
+
+      event.title = title;
+      event.description = description;
+      event.date = parsedDate;
+      event.time = time;
+      event.location = location;
+      event.club = club;
+      event.banner = bannerUrl;
+      event.category = category;
+      event.registrationEnds = parsedRegistrationEnds;
+      await event.save();
+
+      const transformedEvent = {
+        ...event._doc,
+        banner: event.banner || null,
+      };
+      res.json({
+        message: 'Event updated successfully',
+        event: transformedEvent,
+      });
+    } catch (err) {
+      console.error('Event update error:', {
+        message: err.message,
+        stack: err.stack,
+      });
+      if (err.name === 'ValidationError') {
+        return res.status(400).json({ error: `Validation error: ${err.message}` });
+      }
+      if (err.name === 'CastError') {
+        return res.status(400).json({ error: 'Invalid data format' });
+      }
+      res.status(500).json({ error: err.message || 'Failed to update event' });
     }
   }
 );
@@ -2702,116 +2854,6 @@ app.get("/api/events/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Server error in fetching event" });
   }
 });
-
-// Update Event (Creator, Super Admin, or Head Coordinator only)
-app.put(
-  "/api/events/:id",
-  authenticateToken,
-  isSuperAdmin,
-  upload.single("banner"),
-  async (req, res) => {
-    const { id } = req.params;
-    const { title, description, date, time, location, club, category, registrationEnds } = req.body;
-
-    // Validate required fields
-    if (
-      !title ||
-      !description ||
-      !date ||
-      !time ||
-      !location ||
-      !club ||
-      !category ||
-      !registrationEnds
-    ) {
-      return res
-        .status(400)
-        .json({ error: "All fields including category and registration end date are required" });
-    }
-
-    // Validate category
-    if (!["Seminar", "Competition"].includes(category)) {
-      return res.status(400).json({ error: "Invalid event category" });
-    }
-
-    // Validate dates
-    const parsedDate = new Date(date);
-    const parsedRegistrationEnds = new Date(registrationEnds);
-    if (isNaN(parsedDate.getTime()) || isNaN(parsedRegistrationEnds.getTime())) {
-      return res.status(400).json({ error: "Invalid date format for event or registration end date" });
-    }
-
-    // Ensure registration end date is not after event date
-    if (parsedRegistrationEnds > parsedDate) {
-      return res.status(400).json({ error: "Registration end date cannot be after event date" });
-    }
-
-    try {
-      const event = await Event.findById(id);
-      if (!event) {
-        return res.status(404).json({ error: "Event not found" });
-      }
-
-      const clubDoc = await Club.findById(club);
-      if (!clubDoc) {
-        return res.status(404).json({ error: "Club not found" });
-      }
-
-      let bannerUrl = event.banner;
-      if (req.file) {
-        if (!["image/jpeg", "image/png"].includes(req.file.mimetype)) {
-          return res
-            .status(400)
-            .json({ error: "Banner must be a JPEG or PNG image" });
-        }
-        if (req.file.size > 5 * 1024 * 1024) {
-          return res
-            .status(400)
-            .json({ error: "Banner size must be less than 5MB" });
-        }
-        if (event.banner) {
-          const publicId = event.banner.split("/").pop().split(".")[0];
-          await cloudinary.uploader.destroy(`ACEM/${publicId}`);
-        }
-        bannerUrl = await uploadToCloudinary(req.file.buffer);
-      }
-
-      event.title = title;
-      event.description = description;
-      event.date = parsedDate;
-      event.time = time;
-      event.location = location;
-      event.club = club;
-      event.banner = bannerUrl;
-      event.category = category;
-      event.registrationEnds = parsedRegistrationEnds; // Update registration end date
-      await event.save();
-
-      const transformedEvent = {
-        ...event._doc,
-        banner: event.banner || null,
-      };
-      res.json({
-        message: "Event updated successfully",
-        event: transformedEvent,
-      });
-    } catch (err) {
-      console.error("Event update error:", {
-        message: err.message,
-        stack: err.stack,
-      });
-      if (err.name === "ValidationError") {
-        return res
-          .status(400)
-          .json({ error: `Validation error: ${err.message}` });
-      }
-      if (err.name === "CastError") {
-        return res.status(400).json({ error: "Invalid data format" });
-      }
-      res.status(500).json({ error: err.message || "Failed to update event" });
-    }
-  }
-);
 
 // Delete Event (Creator, Super Admin, or Head Coordinator only)
 app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
@@ -2872,7 +2914,10 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
     }
 
     // Check if registration period is open
-    if (event.registrationEnds && new Date() > new Date(event.registrationEnds)) {
+    if (
+      event.registrationEnds &&
+      new Date() > new Date(event.registrationEnds)
+    ) {
       console.error("Registration period has ended for event:", req.params.id);
       return res.status(400).json({ error: "Registration period has ended" });
     }
@@ -3022,7 +3067,9 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
               <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
               <p>Event Time: ${event.time}</p>
               <p>Location: ${event.location}</p>
-              <p>Registration Ends: ${new Date(event.registrationEnds).toLocaleDateString()}</p>
+              <p>Registration Ends: ${new Date(
+                event.registrationEnds
+              ).toLocaleDateString()}</p>
               ${
                 event.hasRegistrationFee
                   ? `<p>Payment Amount: ${
@@ -3245,7 +3292,7 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
 });
 
 //Leave the club
-app.post('/api/clubs/:id/leave', authenticateToken, async (req, res) => {
+app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
@@ -3253,52 +3300,64 @@ app.post('/api/clubs/:id/leave', authenticateToken, async (req, res) => {
 
     // Validate club ID
     if (!mongoose.isValidObjectId(id)) {
-      console.error('POST /api/clubs/:id/leave: Invalid club ID:', id);
-      return res.status(400).json({ error: 'Invalid club ID' });
+      console.error("POST /api/clubs/:id/leave: Invalid club ID:", id);
+      return res.status(400).json({ error: "Invalid club ID" });
     }
 
     // Fetch club
     const club = await Club.findById(id).session(session);
     if (!club) {
-      console.error('POST /api/clubs/:id/leave: Club not found:', id);
-      return res.status(404).json({ error: 'Club not found' });
+      console.error("POST /api/clubs/:id/leave: Club not found:", id);
+      return res.status(404).json({ error: "Club not found" });
     }
 
     // Fetch user
     const user = await User.findById(req.user.id).session(session);
     if (!user) {
-      console.error('POST /api/clubs/:id/leave: User not found:', req.user.id);
-      return res.status(404).json({ error: 'User not found' });
+      console.error("POST /api/clubs/:id/leave: User not found:", req.user.id);
+      return res.status(404).json({ error: "User not found" });
     }
 
     // Check if user is a member
-    if (!user.clubs.some(clubId => clubId.equals(club._id))) {
-      console.error('POST /api/clubs/:id/leave: User not a member of club:', {
+    if (!user.clubs.some((clubId) => clubId.equals(club._id))) {
+      console.error("POST /api/clubs/:id/leave: User not a member of club:", {
         userId: user._id,
         clubId: club._id,
       });
-      return res.status(400).json({ error: 'You are not a member of this club' });
+      return res
+        .status(400)
+        .json({ error: "You are not a member of this club" });
     }
 
     // Prevent super admins and head coordinators from leaving
-    const isSuperAdmin = club.superAdmins.some(admin => admin.equals(user._id));
-    const isHeadCoordinator = user.isHeadCoordinator && user.headCoordinatorClubs.includes(club.name);
+    const isSuperAdmin = club.superAdmins.some((admin) =>
+      admin.equals(user._id)
+    );
+    const isHeadCoordinator =
+      user.isHeadCoordinator && user.headCoordinatorClubs.includes(club.name);
     if (isSuperAdmin || isHeadCoordinator) {
-      console.error('POST /api/clubs/:id/leave: Unauthorized attempt to leave by privileged user:', {
-        userId: user._id,
-        isSuperAdmin,
-        isHeadCoordinator,
+      console.error(
+        "POST /api/clubs/:id/leave: Unauthorized attempt to leave by privileged user:",
+        {
+          userId: user._id,
+          isSuperAdmin,
+          isHeadCoordinator,
+        }
+      );
+      return res.status(403).json({
+        error: "Super admins and head coordinators cannot leave the club",
       });
-      return res.status(403).json({ error: 'Super admins and head coordinators cannot leave the club' });
     }
 
     // Remove user from club's members
-    club.members = club.members.filter(memberId => !memberId.equals(user._id));
+    club.members = club.members.filter(
+      (memberId) => !memberId.equals(user._id)
+    );
     club.memberCount = club.members.length;
 
     // Remove club from user's clubs and clubName arrays
-    user.clubs = user.clubs.filter(clubId => !clubId.equals(club._id));
-    user.clubName = user.clubName.filter(name => name !== club.name);
+    user.clubs = user.clubs.filter((clubId) => !clubId.equals(club._id));
+    user.clubName = user.clubName.filter((name) => name !== club.name);
     user.isClubMember = user.clubName.length > 0;
 
     // Save changes
@@ -3310,7 +3369,7 @@ app.post('/api/clubs/:id/leave', authenticateToken, async (req, res) => {
         {
           userId: user._id,
           message: `You have successfully left ${club.name}.`,
-          type: 'membership',
+          type: "membership",
         },
       ],
       { session }
@@ -3318,7 +3377,7 @@ app.post('/api/clubs/:id/leave', authenticateToken, async (req, res) => {
 
     // Notify super admins and head coordinators via email
     const superAdminEmails = process.env.SUPER_ADMIN_EMAILS
-      ? process.env.SUPER_ADMIN_EMAILS.split(',').map(email => email.trim())
+      ? process.env.SUPER_ADMIN_EMAILS.split(",").map((email) => email.trim())
       : [];
     const recipients = [...(club.headCoordinators || []), ...superAdminEmails];
     if (recipients.length > 0) {
@@ -3329,36 +3388,42 @@ app.post('/api/clubs/:id/leave', authenticateToken, async (req, res) => {
           subject: `Member Left: ${club.name}`,
           text: `User ${user.name} (${user.email}) has left ${club.name}.`,
         });
-        console.log('POST /api/clubs/:id/leave: Notification email sent to:', recipients);
+        console.log(
+          "POST /api/clubs/:id/leave: Notification email sent to:",
+          recipients
+        );
       } catch (emailErr) {
-        console.error('POST /api/clubs/:id/leave: Error sending notification email:', {
-          message: emailErr.message,
-          stack: emailErr.stack,
-        });
+        console.error(
+          "POST /api/clubs/:id/leave: Error sending notification email:",
+          {
+            message: emailErr.message,
+            stack: emailErr.stack,
+          }
+        );
       }
     }
 
     await session.commitTransaction();
-    console.log('POST /api/clubs/:id/leave: User successfully left club:', {
+    console.log("POST /api/clubs/:id/leave: User successfully left club:", {
       userId: user._id,
       clubId: club._id,
     });
-    res.status(200).json({ message: 'You have successfully left the club' });
+    res.status(200).json({ message: "You have successfully left the club" });
   } catch (err) {
     await session.abortTransaction();
-    console.error('POST /api/clubs/:id/leave: Error leaving club:', {
+    console.error("POST /api/clubs/:id/leave: Error leaving club:", {
       message: err.message,
       stack: err.stack,
       userId: req.user?.id,
       clubId: req.params.id,
     });
-    res.status(500).json({ error: 'Server error in leaving club' });
+    res.status(500).json({ error: "Server error in leaving club" });
   } finally {
     session.endSession();
   }
 });
 
-//Contact form 
+//Contact form
 app.post("api/clubs/:id/contact", authenticateToken, async (req, res) => {
   const { clubId } = req.params;
   const { message, coordinatorEmail } = req.body;
@@ -3548,6 +3613,79 @@ app.post(
     }
   }
 );
+
+app.post("/api/clubs/:id/contact", authenticateToken, async (req, res) => {
+  const { id: clubId } = req.params; // Use 'id' to match route parameter
+  const { message, coordinatorEmail } = req.body;
+  try {
+    // Validate club ID
+    if (!mongoose.isValidObjectId(clubId)) {
+      console.error("Invalid club ID:", clubId);
+      return res.status(400).json({ error: "Invalid club ID" });
+    }
+    // Validate input
+    if (!message || !message.trim()) {
+      console.error("Message is required:", { message });
+      return res.status(400).json({ error: "Message is required" });
+    }
+    if (!coordinatorEmail) {
+      console.error("Coordinator email is required:", { coordinatorEmail });
+      return res.status(400).json({ error: "Coordinator email is required" });
+    }
+    // Find the club
+    const club = await Club.findById(clubId).populate("headCoordinators");
+    if (!club) {
+      console.error("Club not found:", clubId);
+      return res.status(404).json({ error: "Club not found" });
+    }
+    // Verify coordinator
+    const coordinator = club.headCoordinators.find(
+      (coord) => coord.email === coordinatorEmail
+    );
+    if (!coordinator) {
+      console.error("Coordinator not found:", coordinatorEmail);
+      return res.status(404).json({ error: "Coordinator not found" });
+    }
+    // Save the message to the database
+    const contactMessage = new ContactMessage({
+      name: req.user.name,
+      email: req.user.email,
+      message,
+      club: club.name,
+      coordinatorEmail,
+      status: "new",
+      priority: "medium",
+      isStarred: false,
+      createdAt: new Date(),
+    });
+    await contactMessage.save();
+    // Send email to coordinator
+    try {
+      await transporter.sendMail({
+        from: `"ACEM" <${process.env.EMAIL_USER}>`,
+        to: coordinator.email,
+        subject: `New Contact Message for ${club.name}`,
+        text: `Message from ${req.user.name} (${req.user.email}):\n\n${message}`,
+      });
+      console.log("Email sent to coordinator:", coordinator.email);
+    } catch (emailErr) {
+      console.error("Error sending email:", {
+        message: emailErr.message,
+        stack: emailErr.stack,
+      });
+      // Continue even if email fails, as message is saved
+    }
+    res.json({ message: "Message sent successfully" });
+  } catch (error) {
+    console.error("Error sending contact message:", {
+      message: error.message,
+      stack: error.stack,
+      clubId,
+      userId: req.user?.id,
+    });
+    res.status(500).json({ error: "Server error in sending contact message" });
+  }
+});
 
 // Update Contact Message Status
 app.patch(
@@ -5144,7 +5282,6 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
   }
 });
 
-
 //landing page stats
 // Get Landing Page Statistics
 app.get("/api/landing/stats", async (req, res) => {
@@ -5165,7 +5302,9 @@ app.get("/api/landing/stats", async (req, res) => {
       message: err.message,
       stack: err.stack,
     });
-    res.status(500).json({ error: "Server error in fetching landing statistics" });
+    res
+      .status(500)
+      .json({ error: "Server error in fetching landing statistics" });
   }
 });
 
@@ -5218,7 +5357,9 @@ app.post("/api/landing/contact", async (req, res) => {
   const { name, email, subject, message, club } = req.body;
 
   if (!name || !email || !message) {
-    return res.status(400).json({ error: "Name, email, and message are required" });
+    return res
+      .status(400)
+      .json({ error: "Name, email, and message are required" });
   }
 
   try {
@@ -5309,7 +5450,9 @@ app.get("/api/landing/clubs", async (req, res) => {
       path: req.path,
       method: req.method,
     });
-    res.status(500).json({ error: "Server error in fetching clubs and events" });
+    res
+      .status(500)
+      .json({ error: "Server error in fetching clubs and events" });
   }
 });
 
