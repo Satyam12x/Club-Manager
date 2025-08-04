@@ -32,24 +32,22 @@ const app = express();
 
 // Configure CORS to allow requests from the frontend URL
 const allowedOrigins = [
-  "https://club-frontend-gamma.vercel.app",
-  "http://localhost:5173",
+  'https://club-frontend-gamma.vercel.app',
+  'http://localhost:5173'
 ];
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-  })
-);
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
 app.use(express.json());
 
 cloudinary.config({
@@ -888,14 +886,11 @@ app.get("/api/auth/user", authenticateToken, async (req, res) => {
   try {
     // Validate user ID
     if (!req.user || !mongoose.Types.ObjectId.isValid(req.user.id)) {
-      console.error("GET /api/auth/user: Invalid user ID", {
-        userId: req.user?.id || "undefined",
-        email: req.user?.email,
-      });
+      console.error(`Invalid user ID: ${req.user?.id || "undefined"}`);
       return res.status(400).json({ error: "Invalid user ID" });
     }
 
-    // Fetch user
+    // Fetch user from database
     const user = await User.findById(req.user.id)
       .select(
         "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo isACEMStudent collegeName profilePicture"
@@ -903,49 +898,30 @@ app.get("/api/auth/user", authenticateToken, async (req, res) => {
       .populate("clubs", "name");
 
     if (!user) {
-      console.error("GET /api/auth/user: User not found", {
-        userId: req.user.id,
-        email: req.user.email,
-      });
+      console.error(`User not found for ID: ${req.user.id}`);
       return res.status(404).json({ error: "User not found" });
     }
 
-    console.log("GET /api/auth/user: Retrieved user data", {
+    // Log retrieved user data for debugging
+    console.log("Retrieved user data:", {
       id: user._id,
       name: user.name,
       email: user.email,
       profilePicture: user.profilePicture,
     });
 
-    res.json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      semester: user.semester,
-      course: user.course,
-      specialization: user.specialization,
-      phone: user.phone,
-      isClubMember: user.isClubMember,
-      clubName: user.clubName,
-      isAdmin: user.isAdmin,
-      isHeadCoordinator: user.isHeadCoordinator,
-      headCoordinatorClubs: user.headCoordinatorClubs,
-      rollNo: user.rollNo,
-      isACEMStudent: user.isACEMStudent,
-      collegeName: user.collegeName,
-      profilePicture: user.profilePicture,
-      clubs: user.clubs,
-    });
+    res.json(user);
   } catch (err) {
-    console.error("GET /api/auth/user: Error", {
+    console.error("Error fetching user:", {
       message: err.message,
       stack: err.stack,
       userId: req.user?.id,
-      email: req.user?.email,
     });
+
     if (err.name === "CastError") {
       return res.status(400).json({ error: "Invalid user ID format" });
     }
+
     res.status(500).json({
       error: "Server error in fetching user data",
       details: err.message,
@@ -1006,76 +982,52 @@ app.post("/api/auth/verify-otp", async (req, res) => {
 });
 
 app.post("/api/auth/login-password", async (req, res) => {
+  const { email, password } = req.body;
+
+  // Validate input
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
+  }
+
   try {
-    // Validate request body
-    const { email, password } = req.body;
-    if (!email || !password) {
-      console.error(
-        "POST /api/auth/login-password: Missing email or password",
-        {
-          body: req.body,
-        }
-      );
-      return res.status(400).json({ error: "Email and password are required" });
+    // Find user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ error: "User not found" });
     }
 
-    // Validate JWT_SECRET
-    if (!process.env.JWT_SECRET) {
-      console.error("POST /api/auth/login-password: JWT_SECRET is not defined");
+    // Check if comparePassword method exists
+    if (!user.comparePassword) {
+      console.error("comparePassword method not found on user object", {
+        userId: user._id,
+        email: user.email,
+      });
       return res.status(500).json({ error: "Server configuration error" });
     }
 
-    // Find user
-    const user = await User.findOne({ email }).select("+password");
-    if (!user) {
-      console.log("POST /api/auth/login-password: User not found", { email });
-      return res.status(400).json({ error: "Invalid email or password" });
-    }
-
-    // Validate password field
-    if (!user.password) {
-      console.error(
-        "POST /api/auth/login-password: User has no password field",
-        {
-          userId: user._id,
-          email,
-        }
-      );
-      return res.status(500).json({ error: "User account is misconfigured" });
-    }
-
     // Compare password
-    const isMatch = await bcrypt.compare(password, user.password);
+    const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      console.log("POST /api/auth/login-password: Password mismatch", {
-        email,
-      });
-      return res.status(400).json({ error: "Invalid email or password" });
+      return res.status(400).json({ error: "Invalid password" });
     }
 
-    // Generate token
+    // Generate JWT
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      {
-        expiresIn: "1h",
-      }
+      { expiresIn: "1d" }
     );
 
-    console.log("POST /api/auth/login-password: Login successful", {
-      userId: user._id,
-      email,
-    });
-
-    res.json({ token, userId: user._id });
+    res.json({ token });
   } catch (err) {
-    console.error("POST /api/auth/login-password: Error", {
+    console.error("Login error:", {
       message: err.message,
       stack: err.stack,
-      email: req.body.email,
-      body: req.body,
+      path: "/api/auth/login-password",
+      method: "POST",
+      userId: undefined,
     });
-    res.status(500).json({ error: "Server error", details: err.message });
+    res.status(500).json({ error: "Server error during login" });
   }
 });
 
@@ -1442,67 +1394,49 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 // User Profile Update
-app.put("/api/auth/user", authenticateToken, async (req, res) => {
-  const {
-    name,
-    email,
-    phone,
-    isACEMStudent,
-    semester,
-    course,
-    specialization,
-    rollNo,
-    collegeName,
-  } = req.body;
+app.put('/api/auth/user', authenticateToken, async (req, res) => {
+  const { name, email, phone, isACEMStudent, semester, course, specialization, rollNo, collegeName } = req.body;
 
   // Validate required fields
   if (!name || !name.trim()) {
-    return res.status(400).json({ error: "Name is required" });
+    return res.status(400).json({ error: 'Name is required' });
   }
   if (name.trim().length < 2) {
-    return res
-      .status(400)
-      .json({ error: "Name must be at least 2 characters" });
+    return res.status(400).json({ error: 'Name must be at least 2 characters' });
   }
   if (!email || !email.trim()) {
-    return res.status(400).json({ error: "Email is required" });
+    return res.status(400).json({ error: 'Email is required' });
   }
   if (!validator.isEmail(email)) {
-    return res.status(400).json({ error: "Invalid email format" });
+    return res.status(400).json({ error: 'Invalid email format' });
   }
-  if (phone && !validator.isMobilePhone(phone, "any")) {
-    return res.status(400).json({ error: "Invalid phone number" });
+  if (phone && !validator.isMobilePhone(phone, 'any')) {
+    return res.status(400).json({ error: 'Invalid phone number' });
   }
   if (semester && (isNaN(semester) || semester < 1 || semester > 8)) {
-    return res
-      .status(400)
-      .json({ error: "Semester must be a number between 1 and 8" });
+    return res.status(400).json({ error: 'Semester must be a number between 1 and 8' });
   }
   if (rollNo && !/^[A-Za-z0-9]+$/.test(rollNo)) {
-    return res.status(400).json({ error: "Invalid roll number format" });
+    return res.status(400).json({ error: 'Invalid roll number format' });
   }
   if (isACEMStudent === undefined) {
-    return res.status(400).json({ error: "ACEM student status is required" });
+    return res.status(400).json({ error: 'ACEM student status is required' });
   }
   if (!isACEMStudent && (!collegeName || !collegeName.trim())) {
-    return res
-      .status(400)
-      .json({ error: "College name is required for non-ACEM students" });
+    return res.status(400).json({ error: 'College name is required for non-ACEM students' });
   }
 
   try {
     // Verify req.user
     if (!req.user?.id || !req.user?.email) {
-      console.error("Profile update error: Invalid user data from token", {
-        user: req.user,
-      });
-      return res.status(401).json({ error: "Invalid authentication token" });
+      console.error('Profile update error: Invalid user data from token', { user: req.user });
+      return res.status(401).json({ error: 'Invalid authentication token' });
     }
 
     // Validate ObjectId
     if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
       console.error(`Invalid user ID: ${req.user.id}`);
-      return res.status(400).json({ error: "Invalid user ID" });
+      return res.status(400).json({ error: 'Invalid user ID' });
     }
 
     // Prepare update object with only provided fields
@@ -1515,13 +1449,9 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
     if (semester) updateFields.semester = Number(semester);
     if (course) updateFields.course = course.trim();
     if (specialization) updateFields.specialization = specialization.trim();
-    if (rollNo && rollNo !== req.user.rollNo)
-      updateFields.rollNo = rollNo.trim();
-    if (!isACEMStudent && collegeName)
-      updateFields.collegeName = collegeName.trim();
-    else if (isACEMStudent)
-      updateFields.collegeName =
-        "Aravali College Of Engineering And Management";
+    if (rollNo && rollNo !== req.user.rollNo) updateFields.rollNo = rollNo.trim();
+    if (!isACEMStudent && collegeName) updateFields.collegeName = collegeName.trim();
+    else if (isACEMStudent) updateFields.collegeName = 'Aravali College Of Engineering And Management';
 
     // Log the update payload
     console.log(`Updating user ${req.user.id} with fields:`, updateFields);
@@ -1531,7 +1461,7 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
       const existingUser = await User.findOne({ email });
       if (existingUser) {
         console.log(`Email already in use: ${email}`);
-        return res.status(400).json({ error: "Email already in use" });
+        return res.status(400).json({ error: 'Email already in use' });
       }
     }
 
@@ -1540,7 +1470,7 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
       const existingUser = await User.findOne({ rollNo });
       if (existingUser) {
         console.log(`Roll number already in use: ${rollNo}`);
-        return res.status(400).json({ error: "Roll number already in use" });
+        return res.status(400).json({ error: 'Roll number already in use' });
       }
     }
 
@@ -1555,39 +1485,32 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { $set: updateFields },
-      {
-        new: true,
-        runValidators: true,
-        select:
-          "_id name email phone isACEMStudent semester course specialization rollNo collegeName",
-      }
+      { new: true, runValidators: true, select: '_id name email phone isACEMStudent semester course specialization rollNo collegeName' }
     );
 
     if (!user) {
       console.log(`User not found for ID: ${req.user.id}`);
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: 'User not found' });
     }
 
     // Update headCoordinators if email changed
     if (email !== req.user.email) {
       const updateResult = await Club.updateMany(
         { headCoordinators: req.user.email },
-        { $set: { "headCoordinators.$": email } }
+        { $set: { 'headCoordinators.$': email } }
       );
-      console.log(
-        `Updated headCoordinators for ${updateResult.modifiedCount} clubs`
-      );
+      console.log(`Updated headCoordinators for ${updateResult.modifiedCount} clubs`);
     }
 
     // Generate new JWT
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: "1d" }
+      { expiresIn: '1d' }
     );
 
     res.json({
-      message: "Profile updated successfully",
+      message: 'Profile updated successfully',
       user: {
         _id: user._id,
         name: user.name,
@@ -1603,7 +1526,7 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
       token,
     });
   } catch (err) {
-    console.error("Profile update error:", {
+    console.error('Profile update error:', {
       message: err.message,
       stack: err.stack,
       userId: req.user?.id,
@@ -1613,19 +1536,15 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
 
     if (err.code === 11000) {
       const field = Object.keys(err.keyValue)[0];
-      return res.status(400).json({
-        error: `Duplicate ${field}: ${err.keyValue[field]} already exists`,
-      });
+      return res.status(400).json({ error: `Duplicate ${field}: ${err.keyValue[field]} already exists` });
     }
 
-    if (err.name === "ValidationError") {
-      const messages = Object.values(err.errors)
-        .map((e) => e.message)
-        .join(", ");
+    if (err.name === 'ValidationError') {
+      const messages = Object.values(err.errors).map((e) => e.message).join(', ');
       return res.status(400).json({ error: `Validation error: ${messages}` });
     }
 
-    res.status(500).json({ error: "Server error in profile update" });
+    res.status(500).json({ error: 'Server error in profile update' });
   }
 });
 
@@ -2014,6 +1933,7 @@ app.delete("/api/auth/delete-account", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Failed to delete account" });
   }
 });
+
 
 // Get All Users (Admin only)
 app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
@@ -3857,24 +3777,24 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   }
 });
 
-app.delete("/api/events/:id/register", authenticateToken, async (req, res) => {
+app.delete('/api/events/:id/register', authenticateToken, async (req, res) => {
   try {
     const event = await Event.findById(req.params.id);
     if (!event) {
-      return res.status(404).json({ error: "Event not found" });
+      return res.status(404).json({ error: 'Event not found' });
     }
     if (!event.registeredUsers.includes(req.user.id)) {
-      return res.status(403).json({ error: "Not registered for this event" });
+      return res.status(403).json({ error: 'Not registered for this event' });
     }
     event.registeredUsers = event.registeredUsers.filter(
       (id) => id.toString() !== req.user.id
     );
     event.registeredCount = (event.registeredCount || 1) - 1;
     await event.save();
-    res.json({ message: "Event registration canceled" });
+    res.json({ message: 'Event registration canceled' });
   } catch (error) {
-    console.error("Error canceling registration:", error);
-    res.status(500).json({ error: "Server error" });
+    console.error('Error canceling registration:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
