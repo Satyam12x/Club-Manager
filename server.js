@@ -30,8 +30,13 @@ dotenv.config();
 
 const app = express();
 
-// Middlewares
-app.use(cors());
+// Configure CORS to allow requests from the frontend URL
+app.use(cors({
+  origin: 'https://club-frontend-gamma.vercel.app',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true // If your frontend sends cookies or authentication tokens
+}));
 app.use(express.json());
 
 cloudinary.config({
