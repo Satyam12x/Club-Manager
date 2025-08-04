@@ -882,6 +882,53 @@ const isHeadCoordinatorOrAdmin = async (req, res, next) => {
   }
 };
 
+app.get("/api/auth/user", authenticateToken, async (req, res) => {
+  try {
+    // Validate user ID
+    if (!req.user || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+      console.error(`Invalid user ID: ${req.user?.id || "undefined"}`);
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    // Fetch user from database
+    const user = await User.findById(req.user.id)
+      .select(
+        "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo isACEMStudent collegeName profilePicture"
+      )
+      .populate("clubs", "name");
+
+    if (!user) {
+      console.error(`User not found for ID: ${req.user.id}`);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Log retrieved user data for debugging
+    console.log("Retrieved user data:", {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      profilePicture: user.profilePicture,
+    });
+
+    res.json(user);
+  } catch (err) {
+    console.error("Error fetching user:", {
+      message: err.message,
+      stack: err.stack,
+      userId: req.user?.id,
+    });
+
+    if (err.name === "CastError") {
+      return res.status(400).json({ error: "Invalid user ID format" });
+    }
+
+    res.status(500).json({
+      error: "Server error in fetching user data",
+      details: err.message,
+    });
+  }
+});
+
 // Authentication Routes
 app.post("/api/auth/send-otp", async (req, res) => {
   const { email } = req.body;
@@ -1887,53 +1934,6 @@ app.delete("/api/auth/delete-account", authenticateToken, async (req, res) => {
   }
 });
 
-// Get User Data
-app.get("/api/auth/user", authenticateToken, async (req, res) => {
-  try {
-    // Validate user ID
-    if (!req.user || !mongoose.Types.ObjectId.isValid(req.user.id)) {
-      console.error(`Invalid user ID: ${req.user?.id || "undefined"}`);
-      return res.status(400).json({ error: "Invalid user ID" });
-    }
-
-    // Fetch user from database
-    const user = await User.findById(req.user.id)
-      .select(
-        "name email semester course specialization phone isClubMember clubName isAdmin isHeadCoordinator headCoordinatorClubs rollNo isACEMStudent collegeName profilePicture"
-      )
-      .populate("clubs", "name");
-
-    if (!user) {
-      console.error(`User not found for ID: ${req.user.id}`);
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Log retrieved user data for debugging
-    console.log("Retrieved user data:", {
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      profilePicture: user.profilePicture,
-    });
-
-    res.json(user);
-  } catch (err) {
-    console.error("Error fetching user:", {
-      message: err.message,
-      stack: err.stack,
-      userId: req.user?.id,
-    });
-
-    if (err.name === "CastError") {
-      return res.status(400).json({ error: "Invalid user ID format" });
-    }
-
-    res.status(500).json({
-      error: "Server error in fetching user data",
-      details: err.message,
-    });
-  }
-});
 
 // Get All Users (Admin only)
 app.get("/api/users", authenticateToken, isAdmin, async (req, res) => {
