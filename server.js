@@ -368,7 +368,7 @@ const notificationSchema = new mongoose.Schema(
     },
     title: {
       type: String,
-      required: true,
+      required: false,
       trim: true,
       minlength: [3, "Title must be at least 3 characters"],
       maxlength: [100, "Title cannot exceed 100 characters"],
