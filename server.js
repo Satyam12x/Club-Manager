@@ -58,7 +58,6 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-
 // Multer configuration
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -1007,52 +1006,76 @@ app.post("/api/auth/verify-otp", async (req, res) => {
 });
 
 app.post("/api/auth/login-password", async (req, res) => {
-  const { email, password } = req.body;
-
-  // Validate input
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
-  }
-
   try {
-    // Find user
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ error: "User not found" });
+    // Validate request body
+    const { email, password } = req.body;
+    if (!email || !password) {
+      console.error(
+        "POST /api/auth/login-password: Missing email or password",
+        {
+          body: req.body,
+        }
+      );
+      return res.status(400).json({ error: "Email and password are required" });
     }
 
-    // Check if comparePassword method exists
-    if (!user.comparePassword) {
-      console.error("comparePassword method not found on user object", {
-        userId: user._id,
-        email: user.email,
-      });
+    // Validate JWT_SECRET
+    if (!process.env.JWT_SECRET) {
+      console.error("POST /api/auth/login-password: JWT_SECRET is not defined");
       return res.status(500).json({ error: "Server configuration error" });
     }
 
-    // Compare password
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return res.status(400).json({ error: "Invalid password" });
+    // Find user
+    const user = await User.findOne({ email }).select("+password");
+    if (!user) {
+      console.log("POST /api/auth/login-password: User not found", { email });
+      return res.status(400).json({ error: "Invalid email or password" });
     }
 
-    // Generate JWT
+    // Validate password field
+    if (!user.password) {
+      console.error(
+        "POST /api/auth/login-password: User has no password field",
+        {
+          userId: user._id,
+          email,
+        }
+      );
+      return res.status(500).json({ error: "User account is misconfigured" });
+    }
+
+    // Compare password
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      console.log("POST /api/auth/login-password: Password mismatch", {
+        email,
+      });
+      return res.status(400).json({ error: "Invalid email or password" });
+    }
+
+    // Generate token
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: "1d" }
+      {
+        expiresIn: "1h",
+      }
     );
 
-    res.json({ token });
+    console.log("POST /api/auth/login-password: Login successful", {
+      userId: user._id,
+      email,
+    });
+
+    res.json({ token, userId: user._id });
   } catch (err) {
-    console.error("Login error:", {
+    console.error("POST /api/auth/login-password: Error", {
       message: err.message,
       stack: err.stack,
-      path: "/api/auth/login-password",
-      method: "POST",
-      userId: undefined,
+      email: req.body.email,
+      body: req.body,
     });
-    res.status(500).json({ error: "Server error during login" });
+    res.status(500).json({ error: "Server error", details: err.message });
   }
 });
 
@@ -1590,11 +1613,9 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
 
     if (err.code === 11000) {
       const field = Object.keys(err.keyValue)[0];
-      return res
-        .status(400)
-        .json({
-          error: `Duplicate ${field}: ${err.keyValue[field]} already exists`,
-        });
+      return res.status(400).json({
+        error: `Duplicate ${field}: ${err.keyValue[field]} already exists`,
+      });
     }
 
     if (err.name === "ValidationError") {
