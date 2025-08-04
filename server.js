@@ -31,11 +31,22 @@ dotenv.config();
 const app = express();
 
 // Configure CORS to allow requests from the frontend URL
+const allowedOrigins = [
+  'https://club-frontend-gamma.vercel.app/',
+  'http://localhost:3000'
+];
+
 app.use(cors({
-  origin: 'https://club-frontend-gamma.vercel.app',
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true // If your frontend sends cookies or authentication tokens
+  credentials: true
 }));
 app.use(express.json());
 
