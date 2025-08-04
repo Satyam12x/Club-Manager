@@ -56,6 +56,20 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+app.get('/api/ping', (req, res) => {
+  res.json({ message: 'Backend is running' });
+});
+
+app.get('/api/test-db', async (req, res) => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    res.json({ message: 'Database connected successfully' });
+  } catch (err) {
+    console.error('Database connection error:', err);
+    res.status(500).json({ error: 'Database connection failed', details: err.message });
+  }
+});
+
 // Multer configuration
 const storage = multer.memoryStorage();
 const upload = multer({
