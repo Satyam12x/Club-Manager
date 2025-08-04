@@ -89,8 +89,6 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "Name is required"],
       trim: true,
-      minlength: [2, "Name must be at least 2 characters"],
-      maxlength: [50, "Name cannot exceed 50 characters"],
     },
     email: {
       type: String,
@@ -102,7 +100,6 @@ const userSchema = new mongoose.Schema(
         /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
         "Please enter a valid email address",
       ],
-      index: true, // Add index for faster queries
     },
     pendingEmail: {
       type: String,
@@ -112,26 +109,15 @@ const userSchema = new mongoose.Schema(
         /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
         "Please enter a valid email address",
       ],
-      sparse: true, // Allow null values without uniqueness conflicts
     },
     password: {
       type: String,
       required: [true, "Password is required"],
       minlength: [6, "Password must be at least 6 characters"],
     },
-    resetPasswordOtp: {
-      type: String,
-      select: false, // Exclude from queries by default for security
-    },
-    resetPasswordExpires: {
-      type: Number,
-      select: false,
-    },
-    failedOtpAttempts: {
-      type: Number,
-      default: 0,
-      select: false,
-    },
+    resetPasswordOtp: { type: String },
+    resetPasswordExpires: { type: Number },
+    failedOtpAttempts: { type: Number, default: 0 },
     phone: {
       type: String,
       required: false,
@@ -140,12 +126,6 @@ const userSchema = new mongoose.Schema(
         /^\+?[1-9]\d{1,14}$/,
         "Please enter a valid phone number (e.g., +1234567890)",
       ],
-      validate: {
-        validator: function (v) {
-          return v ? /^\+?[1-9]\d{1,14}$/.test(v) : true; // Allow empty string
-        },
-        message: "Please enter a valid phone number (e.g., +1234567890)",
-      },
     },
     rollNo: {
       type: String,
@@ -153,60 +133,36 @@ const userSchema = new mongoose.Schema(
       unique: true,
       sparse: true,
       trim: true,
-      match: [
-        /^[A-Za-z0-9-]{1,20}$/,
-        "Roll number must be alphanumeric and up to 20 characters",
-      ],
-      index: true, // Add index for faster queries
     },
     isACEMStudent: {
       type: Boolean,
       required: [true, "ACEM student status is required"],
-      default: false,
     },
     collegeName: {
       type: String,
-      required: function () {
-        return !this.isACEMStudent; // Required only for non-ACEM students
-      },
+      required: false,
       trim: true,
-      maxlength: [100, "College name cannot exceed 100 characters"],
     },
     semester: {
       type: Number,
       min: [1, "Semester must be between 1 and 8"],
       max: [8, "Semester must be between 1 and 8"],
-      required: function () {
-        return this.isACEMStudent; // Required for ACEM students
-      },
+      required: false,
     },
     course: {
       type: String,
-      enum: {
-        values: ["BTech", "BCA", "BBA", "MBA"],
-        message: "Course must be one of: BTech, BCA, BBA, MBA",
-      },
-      required: function () {
-        return this.isACEMStudent; // Required for ACEM students
-      },
+      enum: ["BTech", "BCA", "BBA", "MBA"],
+      required: false,
     },
     specialization: {
       type: String,
       required: false,
       trim: true,
-      maxlength: [50, "Specialization cannot exceed 50 characters"],
     },
     profilePicture: {
       type: String,
       required: false,
       trim: true,
-      validate: {
-        validator: function (v) {
-          // Allow empty string or valid URL
-          return !v || /^https?:\/\/[^\s/$.?#].[^\s]*$/.test(v);
-        },
-        message: "Profile picture must be a valid URL",
-      },
     },
     isClubMember: {
       type: Boolean,
@@ -216,7 +172,6 @@ const userSchema = new mongoose.Schema(
       {
         type: String,
         trim: true,
-        maxlength: [50, "Club name cannot exceed 50 characters"],
       },
     ],
     clubs: [
@@ -243,14 +198,11 @@ const userSchema = new mongoose.Schema(
       {
         type: String,
         trim: true,
-        maxlength: [50, "Club name cannot exceed 50 characters"],
       },
     ],
   },
   {
     timestamps: true,
-    toJSON: { virtuals: true },
-    toObject: { virtuals: true },
   }
 );
 
@@ -1059,6 +1011,8 @@ app.post("/api/auth/signup", async (req, res) => {
       headCoordinatorClubs,
       isACEMStudent,
       collegeName: !isACEMStudent ? collegeName : null,
+      course: null, // Set to null, will be updated in user-details
+      semester: null, // Set to null, will be updated in user-details
     });
     await user.save();
 
@@ -1377,48 +1331,49 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 // User Profile Update
-app.put("/api/auth/user", authenticateToken, async (req, res) => {
-  const {
-    name,
-    email,
-    phone,
-    isACEMStudent,
-    semester,
-    course,
-    specialization,
-    rollNo,
-    collegeName,
-  } = req.body;
+app.put('/api/auth/user', authenticateToken, async (req, res) => {
+  const { name, email, phone, isACEMStudent, semester, course, specialization, rollNo, collegeName } = req.body;
 
   // Validate required fields
   if (!name || !name.trim()) {
-    return res.status(400).json({ error: "Name is required" });
+    return res.status(400).json({ error: 'Name is required' });
+  }
+  if (name.trim().length < 2) {
+    return res.status(400).json({ error: 'Name must be at least 2 characters' });
   }
   if (!email || !email.trim()) {
-    return res.status(400).json({ error: "Email is required" });
+    return res.status(400).json({ error: 'Email is required' });
+  }
+  if (!validator.isEmail(email)) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
+  if (phone && !validator.isMobilePhone(phone, 'any')) {
+    return res.status(400).json({ error: 'Invalid phone number' });
+  }
+  if (semester && (isNaN(semester) || semester < 1 || semester > 8)) {
+    return res.status(400).json({ error: 'Semester must be a number between 1 and 8' });
+  }
+  if (rollNo && !/^[A-Za-z0-9]+$/.test(rollNo)) {
+    return res.status(400).json({ error: 'Invalid roll number format' });
   }
   if (isACEMStudent === undefined) {
-    return res.status(400).json({ error: "ACEM student status is required" });
+    return res.status(400).json({ error: 'ACEM student status is required' });
   }
   if (!isACEMStudent && (!collegeName || !collegeName.trim())) {
-    return res
-      .status(400)
-      .json({ error: "College name is required for non-ACEM students" });
+    return res.status(400).json({ error: 'College name is required for non-ACEM students' });
   }
 
   try {
     // Verify req.user
     if (!req.user?.id || !req.user?.email) {
-      console.error("Profile update error: Invalid user data from token", {
-        user: req.user,
-      });
-      return res.status(401).json({ error: "Invalid authentication token" });
+      console.error('Profile update error: Invalid user data from token', { user: req.user });
+      return res.status(401).json({ error: 'Invalid authentication token' });
     }
 
     // Validate ObjectId
     if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
       console.error(`Invalid user ID: ${req.user.id}`);
-      return res.status(400).json({ error: "Invalid user ID" });
+      return res.status(400).json({ error: 'Invalid user ID' });
     }
 
     // Prepare update object with only provided fields
@@ -1428,13 +1383,12 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
       isACEMStudent,
     };
     if (phone) updateFields.phone = phone.trim();
-    if (semester) updateFields.semester = String(semester).trim();
+    if (semester) updateFields.semester = Number(semester);
     if (course) updateFields.course = course.trim();
     if (specialization) updateFields.specialization = specialization.trim();
-    if (rollNo) updateFields.rollNo = rollNo.trim();
-    if (!isACEMStudent && collegeName)
-      updateFields.collegeName = collegeName.trim();
-    else if (isACEMStudent) updateFields.collegeName = null;
+    if (rollNo && rollNo !== req.user.rollNo) updateFields.rollNo = rollNo.trim();
+    if (!isACEMStudent && collegeName) updateFields.collegeName = collegeName.trim();
+    else if (isACEMStudent) updateFields.collegeName = 'Aravali College Of Engineering And Management';
 
     // Log the update payload
     console.log(`Updating user ${req.user.id} with fields:`, updateFields);
@@ -1444,47 +1398,56 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
       const existingUser = await User.findOne({ email });
       if (existingUser) {
         console.log(`Email already in use: ${email}`);
-        return res.status(400).json({ error: "Email already in use" });
+        return res.status(400).json({ error: 'Email already in use' });
       }
     }
 
-    // Update user with specific fields, bypassing full document validation
+    // Check for duplicate rollNo only if provided and different
+    if (rollNo && rollNo !== req.user.rollNo) {
+      const existingUser = await User.findOne({ rollNo });
+      if (existingUser) {
+        console.log(`Roll number already in use: ${rollNo}`);
+        return res.status(400).json({ error: 'Roll number already in use' });
+      }
+    }
+
+    // Check if email changed and requires OTP (if implemented)
+    if (email !== req.user.email) {
+      // Placeholder for OTP logic
+      // Example: Send OTP and return requiresOtp: true
+      // For now, proceed with update
+    }
+
+    // Update user
     const user = await User.findByIdAndUpdate(
       req.user.id,
       { $set: updateFields },
-      {
-        new: true,
-        runValidators: true,
-        select:
-          "_id name email phone isACEMStudent semester course specialization rollNo collegeName",
-      }
+      { new: true, runValidators: true, select: '_id name email phone isACEMStudent semester course specialization rollNo collegeName' }
     );
 
     if (!user) {
       console.log(`User not found for ID: ${req.user.id}`);
-      return res.status(404).json({ error: "User not found" });
+      return res.status(404).json({ error: 'User not found' });
     }
 
     // Update headCoordinators if email changed
     if (email !== req.user.email) {
       const updateResult = await Club.updateMany(
         { headCoordinators: req.user.email },
-        { $set: { "headCoordinators.$": email } }
+        { $set: { 'headCoordinators.$': email } }
       );
-      console.log(
-        `Updated headCoordinators for ${updateResult.modifiedCount} clubs`
-      );
+      console.log(`Updated headCoordinators for ${updateResult.modifiedCount} clubs`);
     }
 
     // Generate new JWT
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: "1d" }
+      { expiresIn: '1d' }
     );
 
     res.json({
-      message: "Profile updated successfully",
+      message: 'Profile updated successfully',
       user: {
         _id: user._id,
         name: user.name,
@@ -1500,7 +1463,7 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
       token,
     });
   } catch (err) {
-    console.error("Profile update error:", {
+    console.error('Profile update error:', {
       message: err.message,
       stack: err.stack,
       userId: req.user?.id,
@@ -1509,19 +1472,16 @@ app.put("/api/auth/user", authenticateToken, async (req, res) => {
     });
 
     if (err.code === 11000) {
-      return res
-        .status(400)
-        .json({ error: "Duplicate key error: email or phone already exists" });
+      const field = Object.keys(err.keyValue)[0];
+      return res.status(400).json({ error: `Duplicate ${field}: ${err.keyValue[field]} already exists` });
     }
 
-    if (err.name === "ValidationError") {
-      const messages = Object.values(err.errors)
-        .map((e) => e.message)
-        .join(", ");
+    if (err.name === 'ValidationError') {
+      const messages = Object.values(err.errors).map((e) => e.message).join(', ');
       return res.status(400).json({ error: `Validation error: ${messages}` });
     }
 
-    res.status(500).json({ error: "Server error in profile update" });
+    res.status(500).json({ error: 'Server error in profile update' });
   }
 });
 
