@@ -32,8 +32,8 @@ const app = express();
 
 // Configure CORS to allow requests from the frontend URL
 const allowedOrigins = [
-  'https://club-frontend-gamma.vercel.app/',
-  'http://localhost:3000'
+  'https://club-frontend-gamma.vercel.app',
+  'http://localhost:5173'
 ];
 
 app.use(cors({
