@@ -3801,6 +3801,27 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   }
 });
 
+app.delete('/api/events/:id/register', authenticateToken, async (req, res) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+    if (!event.registeredUsers.includes(req.user.id)) {
+      return res.status(403).json({ error: 'Not registered for this event' });
+    }
+    event.registeredUsers = event.registeredUsers.filter(
+      (id) => id.toString() !== req.user.id
+    );
+    event.registeredCount = (event.registeredCount || 1) - 1;
+    await event.save();
+    res.json({ message: 'Event registration canceled' });
+  } catch (error) {
+    console.error('Error canceling registration:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 //Leave the club
 app.post("/api/clubs/:id/leave", authenticateToken, async (req, res) => {
   const session = await mongoose.startSession();
@@ -6137,6 +6158,7 @@ app.get("/api/points-table", authenticateToken, async (req, res) => {
           email: user.email || "N/A",
           rollNo: user.rollNo || "N/A",
           clubName: clubNames,
+          clubCount: user.clubName?.length || 0,
           eventPoints: eventUserPoints?.eventPoints || 0,
           practicePoints: practiceUserPoints?.practicePoints || 0,
           totalPoints:
