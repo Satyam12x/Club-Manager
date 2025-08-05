@@ -31,7 +31,7 @@ dotenv.config();
 const app = express();
 
 app.use(cors({
-  origin: 'https://club-frontend-cyan.vercel.app',
+  origin: 'https://club-frontend-cyan.vercel.app/',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
