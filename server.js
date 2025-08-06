@@ -1766,7 +1766,7 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
           "Semester, course, specialization, and ACEM student status are required",
       });
     }
-    if (isACEMStudent && !rollNo) {
+    if (isACEMStudent && (!rollNo || rollNo.trim() === "")) {
       return res.status(400).json({
         error: "Roll number is required for ACEM students",
       });
@@ -1774,6 +1774,11 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
     if (!isACEMStudent && !collegeName) {
       return res.status(400).json({
         error: "College name is required for non-ACEM students",
+      });
+    }
+    if (!isACEMStudent && rollNo) {
+      return res.status(400).json({
+        error: "Roll number should not be provided for non-ACEM students",
       });
     }
 
@@ -1787,7 +1792,7 @@ app.post("/api/auth/user-details", authenticateToken, async (req, res) => {
     user.semester = semester;
     user.course = course;
     user.specialization = specialization;
-    user.rollNo = isACEMStudent ? rollNo : null;
+    user.rollNo = isACEMStudent ? rollNo : null; // Explicitly set to null for non-ACEM
     user.isACEMStudent = isACEMStudent;
     user.collegeName = !isACEMStudent ? collegeName : null;
     user.isClubMember = isClubMember || false;
