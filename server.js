@@ -3767,6 +3767,227 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   }
 });
 
+apppost("/clubs/:clubId/events/register", authenticateToken, async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    await asyncRetry(
+      async () => {
+        session.startTransaction();
+
+        // Input validation
+        const { eventId, name, email, rollNo, isACEMStudent } = req.body;
+
+        if (!eventId || !name || !email || isACEMStudent === undefined) {
+          throw new Error("Event ID, name, email, and ACEM student status are required");
+        }
+
+        // Sanitize inputs
+        const sanitizedName = sanitizeHtml(name.trim());
+        const sanitizedEmail = sanitizeHtml(email.trim().toLowerCase());
+        const sanitizedRollNo = rollNo ? sanitizeHtml(rollNo.trim()) : null;
+
+        if (isACEMStudent && !sanitizedRollNo) {
+          throw new Error("Roll number is required for ACEM students");
+        }
+
+        // Validate email format
+        if (!validator.isEmail(sanitizedEmail)) {
+          throw new Error("Invalid email address");
+        }
+
+        // Validate roll number format (example: ACEM-specific format)
+        if (isACEMStudent && sanitizedRollNo) {
+          const rollNoRegex = /^[A-Z0-9]{6,10}$/; // Adjust based on ACEM roll number format
+          if (!rollNoRegex.test(sanitizedRollNo)) {
+            throw new Error("Invalid roll number format");
+          }
+        }
+
+        // Validate club ID
+        if (!mongoose.isValidObjectId(req.params.clubId)) {
+          throw new Error("Invalid club ID");
+        }
+
+        // Validate event ID
+        if (!mongoose.isValidObjectId(eventId)) {
+          throw new Error("Invalid event ID");
+        }
+
+        // Fetch club and verify event belongs to it
+        const club = await Club.findById(req.params.clubId).session(session);
+        if (!club) {
+          throw new Error(`Club with ID ${req.params.clubId} not found`);
+        }
+
+        // Fetch event and verify it belongs to the club
+        const event = await Event.findOne({
+          _id: eventId,
+          club: req.params.clubId, // Ensure event is associated with the club
+        })
+          .populate("club")
+          .session(session);
+        if (!event) {
+          throw new Error(`Event with ID ${eventId} not found in club ${club.name}`);
+        }
+
+        // Fetch user
+        const userId = req.user.id;
+        const user = await User.findById(userId).session(session);
+        if (!user) {
+          throw new Error("User not found");
+        }
+
+        // Check if user is already registered
+        event.registeredUsers = event.registeredUsers || [];
+        if (event.registeredUsers.some((reg) => reg.userId.toString() === userId)) {
+          throw new Error("User already registered for this event");
+        }
+
+        // Validate event type
+        const validEventTypes = ["Intra-College", "Inter-College"];
+        if (!validEventTypes.includes(event.eventType)) {
+          throw new Error("Invalid event type");
+        }
+        if (event.eventType === "Intra-College" && !isACEMStudent) {
+          throw new Error("Only ACEM students can register for Intra-College events");
+        }
+
+        // Payment handling
+        let paymentStatus = "not_required";
+        let transactionId = null;
+        if (event.eventType === "Inter-College" && event.hasRegistrationFee) {
+          const amount = isACEMStudent ? event.acemFee : event.nonAcemFee;
+          if (!amount || isNaN(amount) || amount <= 0) {
+            throw new Error("Invalid registration fee amount");
+          }
+          transactionId = `TXN_${uuidv4()}`;
+          // Placeholder for payment gateway integration (e.g., Stripe, Razorpay)
+          paymentStatus = "success"; // TODO: Replace with real payment gateway
+          if (paymentStatus !== "success") {
+            throw new Error("Payment failed");
+          }
+        }
+
+        // Handle club membership for ACEM students
+        const effectiveRollNo = isACEMStudent ? sanitizedRollNo || user.rollNo : null;
+        if (isACEMStudent) {
+          if (!club.members.includes(userId)) {
+            club.members = club.members || [];
+            club.members.push(userId);
+            club.memberCount = await User.countDocuments(
+              { clubName: club.name },
+              { session }
+            );
+            await club.save({ session });
+            user.clubName = [...new Set([...(user.clubName || []), club.name])];
+            user.clubs = [...new Set([...(user.clubs || []), club._id])];
+            user.isClubMember = true;
+            await user.save({ session });
+          }
+        }
+
+        // Register user for event
+        event.registeredUsers.push({
+          userId,
+          name: sanitizedName,
+          email: sanitizedEmail,
+          rollNo: effectiveRollNo,
+          isACEMStudent,
+        });
+        await event.save({ session });
+
+        // Generate QR code for non-ACEM students in Inter-College events
+        let qrCode = null;
+        if (!isACEMStudent && event.eventType === "Inter-College") {
+          const qrData = JSON.stringify({
+            userId,
+            eventId: event._id,
+            transactionId: transactionId || uuidv4(),
+            eventTitle: event.title,
+            userName: sanitizedName,
+          });
+          qrCode = await QRCode.toDataURL(qrData);
+        }
+
+        // Create notification
+        await Notification.create(
+          [
+            {
+              userId,
+              message: `You have successfully registered for the ${event.category.toLowerCase()} "${
+                event.title
+              }" in ${club.name}.`,
+              type: "event",
+            },
+          ],
+          { session }
+        );
+
+        // Send confirmation email
+        if (qrCode) {
+          await transporter.sendMail({
+            from: `"ACEM" <${process.env.EMAIL_USER}>`,
+            to: sanitizedEmail,
+            subject: `Registration Confirmation for ${event.title}`,
+            html: `
+              <h3>Registration Successful</h3>
+              <p>Thank you for registering for ${event.title}!</p>
+              <p>Event Date: ${new Date(event.date).toLocaleDateString()}</p>
+              <p>Event Time: ${event.time}</p>
+              <p>Location: ${event.location}</p>
+              ${
+                event.hasRegistrationFee
+                  ? `<p>Payment Amount: ${
+                      isACEMStudent ? event.acemFee : event.nonAcemFee
+                    } INR</p>`
+                  : ""
+              }
+              <p>Scan the QR code below to verify your registration:</p>
+              <img src="${qrCode}" alt="Registration QR Code" />
+            `,
+          });
+        }
+
+        await session.commitTransaction();
+        return res.status(200).json({
+          message: isACEMStudent
+            ? "Successfully joined the club and registered for the event"
+            : "Registration successful",
+          qrCode,
+          paymentStatus,
+          transactionId,
+        });
+      },
+      {
+        retries: 2, // Retry up to 2 times for transient errors
+        factor: 2,
+        minTimeout: 1000,
+        maxTimeout: 5000,
+      }
+    );
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("Error registering for event:", {
+      message: err.message,
+      stack: err.stack,
+      clubId: req.params.clubId,
+      eventId: req.body.eventId,
+      userId: req.user?.id,
+    });
+    const statusCode = err.message.includes("not found")
+      ? 404
+      : err.message.includes("already registered") ||
+        err.message.includes("Invalid") ||
+        err.message.includes("Only ACEM students") ||
+        err.message.includes("Payment failed")
+      ? 400
+      : 500;
+    return res.status(statusCode).json({ error: err.message });
+  } finally {
+    session.endSession();
+  }
+});
+
 app.delete('/api/events/:id/register', authenticateToken, async (req, res) => {
   try {
     const event = await Event.findById(req.params.id);
