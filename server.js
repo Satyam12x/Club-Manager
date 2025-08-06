@@ -32,7 +32,7 @@ const app = express();
 
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }));
@@ -3767,7 +3767,7 @@ app.post("/api/events/:id/register", authenticateToken, async (req, res) => {
   }
 });
 
-apppost("/clubs/:clubId/events/register", authenticateToken, async (req, res) => {
+app.post("/clubs/:clubId/events/register", authenticateToken, async (req, res) => {
   const session = await mongoose.startSession();
   try {
     await asyncRetry(
