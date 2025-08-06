@@ -8,18 +8,7 @@
   ],
   "routes": [
     {
-      "src": "/api/clubs",
-      "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      "dest": "server.js"
-    },
-    {
-      "src": "/api/auth/user",
-      "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      "dest": "server.js"
-    },
-    {
       "src": "/(.*)",
-      "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
       "dest": "server.js"
     }
   ]
