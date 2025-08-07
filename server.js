@@ -31,7 +31,7 @@ dotenv.config();
 const app = express();
 
 app.use(cors({
-  origin: '*',
+  origin: 'https://club-frontend-sepia.vercel.app',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
